@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ComfyUI News Tracker</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>ComfyUI News Tracker</h1>
+        <p>Focused ComfyUI intelligence feed: model releases, image/video nodes, optimizations, workflows, and community signals.</p>
+      </div>
+      <div class="actions">
+        <select id="themeSelect" class="theme-select" title="Theme">
+          <option value="system">System</option>
+          <option value="light">Light</option>
+          <option value="dark">Dark</option>
+        </select>
+        <a class="icon-link" href="/" title="Signals">All</a>
+        <a class="icon-link" href="/daily" title="Daily digest">Daily</a>
+        <a class="icon-link" href="/rss.xml" title="RSS">RSS</a>
+        <a class="icon-link" href="/api/export/markdown" title="Markdown">MD</a>
+        <button id="refreshBtn" type="button">Refresh</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <aside class="panel">
+        <section>
+          <h2>Filters</h2>
+          <label class="field">
+            <span>Keyword</span>
+            <input id="searchInput" type="search" placeholder="Flux, Wan, Qwen Image, LoRA..." />
+          </label>
+          <label class="field">
+            <span>Category</span>
+            <select id="categorySelect">
+              <option value="">All</option>
+              <option value="official">Official</option>
+              <option value="tooling">Tooling</option>
+              <option value="model_nodes">Model nodes</option>
+              <option value="models">Models</option>
+              <option value="custom_nodes">Custom nodes</option>
+              <option value="ecosystem">Ecosystem</option>
+              <option value="community">Community</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Source tier</span>
+            <select id="tierSelect">
+              <option value="">All tiers</option>
+              <option value="T1">T1 primary</option>
+              <option value="T1.5">T1.5 high signal</option>
+              <option value="T2">T2 broad scan</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Source channel</span>
+            <select id="channelSelect">
+              <option value="">All channels</option>
+              <option value="official">Official</option>
+              <option value="github">GitHub</option>
+              <option value="rss">RSS</option>
+              <option value="community">Community</option>
+              <option value="releases">Releases</option>
+              <option value="x">X</option>
+              <option value="bilibili">Bilibili</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Sort</span>
+            <select id="sortSelect">
+              <option value="score">Signal score</option>
+              <option value="latest">Latest first</option>
+            </select>
+          </label>
+          <label class="check">
+            <input id="featuredOnly" type="checkbox" />
+            <span>Featured only</span>
+          </label>
+        </section>
+
+        <section>
+          <h2>Overview</h2>
+          <div id="stats" class="stats"></div>
+          <div id="runStatus" class="run-status"></div>
+        </section>
+
+        <section>
+          <h2>Data access</h2>
+          <div class="api-list">
+            <a href="/api/public">Public API index</a>
+            <a href="/api/public/items?mode=selected&take=30">Public selected</a>
+            <a href="/api/public/items?mode=all&take=30">Public timeline</a>
+            <a href="/api/public/daily">Public daily</a>
+            <a href="/api/public/dailies">Public dailies</a>
+            <a href="/api/public/briefing?hours=168&take=12">Public briefing</a>
+            <a href="/api/public/sources">Public sources</a>
+            <a href="/api/public/health">Public health</a>
+            <a href="/comfyui-skill/">Skill</a>
+            <a href="/selected.xml">/selected.xml</a>
+            <a href="/all.xml">/all.xml</a>
+            <a href="/daily.xml">/daily.xml</a>
+            <a href="/digests.xml">/digests.xml</a>
+            <a href="/feeds.opml">/feeds.opml</a>
+            <a href="/rss/selected.xml">RSS selected</a>
+            <a href="/rss/all.xml">RSS all</a>
+            <a href="/rss/daily.xml">RSS daily</a>
+            <a href="/rss/digests.xml">RSS digests</a>
+          </div>
+        </section>
+
+        <section>
+          <h2>Suggest source</h2>
+          <form id="sourceForm" class="stack-form">
+            <input id="sourceName" type="text" placeholder="Source name" maxlength="120" required />
+            <input id="sourceUrl" type="url" placeholder="https://..." maxlength="500" required />
+            <textarea id="sourceReason" placeholder="Why it belongs in this tracker" minlength="15" maxlength="1000" required></textarea>
+            <input id="sourceContact" type="text" placeholder="Contact (optional)" maxlength="120" />
+            <button type="submit">Submit source</button>
+            <p id="sourceFormStatus" class="form-status"></p>
+          </form>
+        </section>
+
+        <section>
+          <h2>Feedback</h2>
+          <form id="feedbackForm" class="stack-form">
+            <textarea id="feedbackMessage" placeholder="Coverage gaps, model/source misses, ranking issues, or UI notes" maxlength="2000" required></textarea>
+            <input id="feedbackContact" type="text" placeholder="Contact (optional)" maxlength="120" />
+            <button type="submit">Send feedback</button>
+            <p id="feedbackStatus" class="form-status"></p>
+          </form>
+        </section>
+      </aside>
+
+      <section class="feed">
+        <div class="feed-head">
+          <div>
+            <h2>Latest Signals</h2>
+            <p id="feedMeta">Loading</p>
+          </div>
+          <div class="segmented" role="group" aria-label="Time range">
+            <button class="active" data-hours="">All</button>
+            <button data-hours="24">24h</button>
+            <button data-hours="168">7d</button>
+          </div>
+        </div>
+        <div id="sourceWall" class="source-wall"></div>
+        <div id="dailyView" class="daily-view" hidden>
+          <div class="daily-toolbar">
+            <label class="field compact-field">
+              <span>Digest date</span>
+              <select id="dailyDateSelect"></select>
+            </label>
+            <a id="dailyMarkdownLink" class="icon-link" href="/api/export/markdown">Markdown</a>
+            <a id="dailyRssLink" class="icon-link" href="/rss/daily.xml">RSS</a>
+            <a class="icon-link" href="/digests.xml">Digest RSS</a>
+            <a class="icon-link" href="/feeds.opml">OPML</a>
+          </div>
+          <div id="dailyArchive" class="daily-archive"></div>
+          <div id="dailySections" class="daily-sections"></div>
+        </div>
+        <div id="clusters" class="clusters"></div>
+        <div id="items" class="items"></div>
+        <div class="pagination" aria-label="Feed pagination">
+          <button id="prevPage" type="button">Previous</button>
+          <span id="pageMeta">Page 1</span>
+          <button id="nextPage" type="button">Next</button>
+        </div>
+      </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>

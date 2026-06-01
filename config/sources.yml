@@ -1,0 +1,315 @@
+keywords:
+  include:
+    - comfyui
+    - comfy
+    - custom node
+    - custom nodes
+    - workflow
+    - checkpoint
+    - lora
+    - lycoris
+    - finetune
+    - fine-tune
+    - weights
+    - safetensors
+    - diffusion
+    - controlnet
+    - flux
+    - kontext
+    - wan
+    - qwen image
+    - qwen-image
+    - hunyuan
+    - ltx
+    - video
+    - image generation
+    - gguf
+    - quant
+    - fp8
+    - node support
+    - wrapper
+    - stable diffusion
+  exclude:
+    - sponsored
+    - giveaway
+
+sources:
+  - id: comfyui-commits-atom
+    name: ComfyUI commits atom
+    type: rss
+    url: https://github.com/comfyanonymous/ComfyUI/commits/master.atom
+    category: official
+    tier: T1
+    weight: 5
+
+  - id: comfyui-releases-atom
+    name: ComfyUI releases atom
+    type: rss
+    url: https://github.com/comfyanonymous/ComfyUI/releases.atom
+    category: official
+    tier: T1
+    weight: 5
+
+  - id: comfyui-frontend-releases-atom
+    name: ComfyUI frontend releases atom
+    type: rss
+    url: https://github.com/Comfy-Org/ComfyUI_frontend/releases.atom
+    category: official
+    tier: T1
+    weight: 4
+
+  - id: comfyui-manager-releases-atom
+    name: ComfyUI Manager releases atom
+    type: rss
+    url: https://github.com/ltdrdata/ComfyUI-Manager/releases.atom
+    category: tooling
+    tier: T1
+    weight: 4
+
+  - id: comfyui-blog
+    name: ComfyUI official blog
+    type: rss
+    url: https://blog.comfy.org/feed
+    category: official
+    tier: T1
+    weight: 5
+
+  - id: comfyui-repo-releases
+    name: ComfyUI releases
+    type: github_releases
+    url: https://api.github.com/repos/comfyanonymous/ComfyUI/releases
+    category: official
+    tier: T1
+    weight: 5
+    requires_token: true
+
+  - id: comfyui-repo-commits
+    name: ComfyUI commits
+    type: github_commits
+    url: https://api.github.com/repos/comfyanonymous/ComfyUI/commits?per_page=30
+    category: official
+    tier: T1
+    weight: 4
+    requires_token: true
+
+  - id: comfyui-frontend-releases
+    name: ComfyUI frontend releases
+    type: github_releases
+    url: https://api.github.com/repos/Comfy-Org/ComfyUI_frontend/releases
+    category: official
+    tier: T1
+    weight: 4
+    requires_token: true
+
+  - id: comfyui-manager-releases
+    name: ComfyUI Manager releases
+    type: github_releases
+    url: https://api.github.com/repos/ltdrdata/ComfyUI-Manager/releases
+    category: tooling
+    tier: T1
+    weight: 4
+    requires_token: true
+
+  - id: comfy-cli-releases
+    name: Comfy CLI releases
+    type: github_releases
+    url: https://api.github.com/repos/Comfy-Org/comfy-cli/releases
+    category: tooling
+    tier: T1.5
+    weight: 3
+    requires_token: true
+
+  - id: comfyui-custom-scripts-releases
+    name: ComfyUI custom scripts releases
+    type: github_releases
+    url: https://api.github.com/repos/pythongosssss/ComfyUI-Custom-Scripts/releases
+    category: custom_nodes
+    tier: T1.5
+    weight: 3
+    requires_token: true
+
+  - id: wanvideo-wrapper-commits-atom
+    name: ComfyUI WanVideo Wrapper commits
+    type: rss
+    url: https://github.com/kijai/ComfyUI-WanVideoWrapper/commits/main.atom
+    category: model_nodes
+    tier: T1.5
+    weight: 5
+
+  - id: hunyuanvideo-wrapper-commits-atom
+    name: ComfyUI HunyuanVideo Wrapper commits
+    type: rss
+    url: https://github.com/kijai/ComfyUI-HunyuanVideoWrapper/commits/main.atom
+    category: model_nodes
+    tier: T1.5
+    weight: 5
+
+  - id: ltxvideo-wrapper-commits-atom
+    name: ComfyUI LTXVideo commits
+    type: rss
+    url: https://github.com/kijai/ComfyUI-LTXVideo/commits/master.atom
+    category: model_nodes
+    tier: T1.5
+    weight: 5
+
+  - id: comfyui-gguf-commits-atom
+    name: ComfyUI GGUF commits
+    type: rss
+    url: https://github.com/city96/ComfyUI-GGUF/commits/main.atom
+    category: model_nodes
+    tier: T1.5
+    weight: 4
+
+  - id: comfyui-ipadapter-commits-atom
+    name: ComfyUI IPAdapter Plus commits
+    type: rss
+    url: https://github.com/cubiq/ComfyUI_IPAdapter_plus/commits/main.atom
+    category: model_nodes
+    tier: T1.5
+    weight: 4
+
+  - id: comfyui-video-helper-suite-commits-atom
+    name: ComfyUI Video Helper Suite commits
+    type: rss
+    url: https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite/commits/main.atom
+    category: model_nodes
+    tier: T1.5
+    weight: 4
+
+  - id: comfyui-frame-interpolation-commits-atom
+    name: ComfyUI Frame Interpolation commits
+    type: rss
+    url: https://github.com/Fannovel16/ComfyUI-Frame-Interpolation/commits/main.atom
+    category: model_nodes
+    tier: T1.5
+    weight: 4
+
+  - id: comfyui-impact-pack-commits-atom
+    name: ComfyUI Impact Pack commits
+    type: rss
+    url: https://github.com/ltdrdata/ComfyUI-Impact-Pack/commits/Main.atom
+    category: custom_nodes
+    tier: T1.5
+    weight: 4
+
+  - id: comfyui-crystools-releases-atom
+    name: ComfyUI Crystools releases
+    type: rss
+    url: https://github.com/crystian/ComfyUI-Crystools/releases.atom
+    category: tooling
+    tier: T1.5
+    weight: 3
+
+  - id: rgthree-comfy-releases-atom
+    name: rgthree Comfy releases
+    type: rss
+    url: https://github.com/rgthree/rgthree-comfy/releases.atom
+    category: custom_nodes
+    tier: T1.5
+    weight: 3
+
+  - id: comfyui-layerstyle-commits-atom
+    name: ComfyUI LayerStyle commits
+    type: rss
+    url: https://github.com/chflame163/ComfyUI_LayerStyle/commits/main.atom
+    category: custom_nodes
+    tier: T1.5
+    weight: 3
+
+  - id: was-node-suite-releases-atom
+    name: WAS Node Suite releases
+    type: rss
+    url: https://github.com/WASasquatch/was-node-suite-comfyui/releases.atom
+    category: custom_nodes
+    tier: T1.5
+    weight: 3
+
+  - id: github-comfyui-flux-search
+    name: GitHub ComfyUI Flux repositories
+    type: github_search_repos
+    url: https://api.github.com/search/repositories?q=ComfyUI+Flux+in:name,description,readme&sort=updated&order=desc&per_page=20
+    category: model_nodes
+    tier: T2
+    weight: 2
+
+  - id: github-comfyui-wan-search
+    name: GitHub ComfyUI Wan video repositories
+    type: github_search_repos
+    url: https://api.github.com/search/repositories?q=ComfyUI+Wan+video+in:name,description,readme&sort=updated&order=desc&per_page=20
+    category: model_nodes
+    tier: T2
+    weight: 2
+
+  - id: github-comfyui-qwen-search
+    name: GitHub ComfyUI Qwen Image repositories
+    type: github_search_repos
+    url: https://api.github.com/search/repositories?q=ComfyUI+Qwen+Image+in:name,description,readme&sort=updated&order=desc&per_page=20
+    category: model_nodes
+    tier: T2
+    weight: 2
+
+  - id: github-comfyui-gguf-search
+    name: GitHub ComfyUI GGUF repositories
+    type: github_search_repos
+    url: https://api.github.com/search/repositories?q=ComfyUI+GGUF+in:name,description,readme&sort=updated&order=desc&per_page=20
+    category: model_nodes
+    tier: T2
+    weight: 2
+
+  - id: bilibili-comfyui-models
+    name: Bilibili ComfyUI model/node search
+    type: bilibili_search
+    url: local://bilibili-search?q=ComfyUI 新模型 视频模型 节点 Flux Wan Qwen
+    category: community
+    tier: T2
+    weight: 2
+
+  - id: x-comfyui-models
+    name: X ComfyUI model/node search
+    type: x_search
+    url: local://x-search?q=ComfyUI (model OR release OR node OR workflow OR Flux OR Wan OR Qwen OR Hunyuan OR LTX)
+    category: community
+    tier: T2
+    weight: 2
+    requires_x_token: true
+
+  - id: github-comfyui-search
+    name: GitHub ComfyUI repositories
+    type: github_search_repos
+    url: https://api.github.com/search/repositories?q=ComfyUI+in:name,description,readme&sort=updated&order=desc&per_page=30
+    category: ecosystem
+    tier: T2
+    weight: 2
+
+  - id: github-comfyui-topics
+    name: GitHub ComfyUI topics
+    type: github_search_repos
+    url: https://api.github.com/search/repositories?q=topic:comfyui&sort=updated&order=desc&per_page=30
+    category: ecosystem
+    tier: T2
+    weight: 2
+
+  - id: reddit-comfyui
+    name: Reddit r/comfyui
+    type: rss
+    url: https://www.reddit.com/r/comfyui/.rss
+    category: community
+    tier: T2
+    weight: 2
+
+  - id: reddit-stablediffusion-comfyui
+    name: Reddit r/StableDiffusion ComfyUI
+    type: rss
+    url: https://www.reddit.com/r/StableDiffusion/search.rss?q=ComfyUI&restrict_sr=1&sort=new
+    category: community
+    tier: T2
+    weight: 2
+
+  - id: github-comfyui-issues
+    name: ComfyUI recently updated issues
+    type: github_issues
+    url: https://api.github.com/repos/comfyanonymous/ComfyUI/issues?state=open&sort=updated&direction=desc&per_page=30
+    category: official
+    tier: T1.5
+    weight: 1
+    requires_token: true
