@@ -29,6 +29,14 @@ keywords:
     - node support
     - wrapper
     - stable diffusion
+    - huggingface
+    - hugging face
+    - civitai
+    - model card
+    - youtube
+    - tutorial
+    - discord
+    - forum
   exclude:
     - sponsored
     - giveaway
@@ -272,6 +280,62 @@ sources:
     tier: T2
     weight: 2
     requires_x_token: true
+
+  - id: huggingface-comfyui-models
+    name: Hugging Face ComfyUI model search
+    type: huggingface_models
+    url: local://huggingface-models?q=ComfyUI Flux Wan Qwen LoRA GGUF
+    category: models
+    tier: T2
+    weight: 3
+
+  - id: huggingface-video-models
+    name: Hugging Face video/image model search
+    type: huggingface_models
+    url: local://huggingface-models?q=Flux Wan Qwen Hunyuan LTX LoRA GGUF safetensors
+    category: models
+    tier: T2
+    weight: 3
+
+  - id: civitai-comfyui-models
+    name: Civitai ComfyUI model search
+    type: civitai_models
+    url: local://civitai-models?q=ComfyUI Flux Wan Qwen LoRA
+    category: models
+    tier: T2
+    weight: 3
+
+  - id: youtube-comfyui-models
+    name: YouTube ComfyUI model/workflow search
+    type: youtube_search
+    url: local://youtube-search?q=ComfyUI Flux Wan Qwen LoRA GGUF workflow tutorial
+    category: community
+    tier: T2
+    weight: 2
+
+  - id: comfyui-forum-rss
+    name: ComfyUI GitHub discussions RSS
+    type: rss
+    url: https://github.com/comfyanonymous/ComfyUI/discussions.atom
+    category: community
+    tier: T2
+    weight: 2
+
+  - id: discord-comfyui-feed
+    name: Discord ComfyUI bridge feed
+    type: discord_feed
+    url: env://DISCORD_COMFYUI_FEED_URL
+    category: community
+    tier: T2
+    weight: 2
+
+  - id: forum-comfyui-json
+    name: ComfyUI forum JSON bridge
+    type: forum_json
+    url: env://COMFYUI_FORUM_JSON_URL
+    category: community
+    tier: T2
+    weight: 2
 
   - id: github-comfyui-search
     name: GitHub ComfyUI repositories

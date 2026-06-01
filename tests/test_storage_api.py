@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import tempfile
 import unittest
 from datetime import UTC, datetime
@@ -22,7 +23,25 @@ from app.digest import render_markdown_digest, webhook_payload
 from app.main import app
 from app.models import NewsItem
 from app.settings import settings
-from app.sources import bilibili_search_terms, clean_x_text, load_sources, parse_x_author, tweet_body, x_browser_query
+from app.sources import (
+    Fetcher,
+    Source,
+    author_is_allowlisted,
+    bilibili_search_terms,
+    clean_x_text,
+    json_feed_headers,
+    json_feed_rows,
+    json_row_engagement,
+    json_row_url,
+    load_sources,
+    parse_compact_count,
+    parse_x_author,
+    resolve_source_url,
+    source_url_env_name,
+    tweet_body,
+    x_browser_query,
+    x_interaction_count,
+)
 from app.storage import Storage, normalize_fts_query
 
 
@@ -73,6 +92,22 @@ class StorageTests(unittest.TestCase):
             changed = storage.upsert_items([make_item("a", "First changed")])
             self.assertEqual((changed.inserted, changed.updated, changed.unchanged), (0, 1, 0))
 
+    def test_upsert_preserves_llm_enrichment_raw(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.sqlite3")
+            item = make_item("llm-a", "LLM A")
+            storage.upsert_items([item])
+            with storage.connection() as conn:
+                conn.execute(
+                    "UPDATE items SET raw = ? WHERE guid = ?",
+                    ('{"llm": {"zh_summary": "中文摘要", "cluster_key": "model:flux"}}', "llm-a"),
+                )
+
+            storage.upsert_items([make_item("llm-a", "LLM A changed")])
+            row = storage.list_items(limit=1, include_raw=True)[0]
+
+            self.assertEqual(row["raw"]["llm"]["zh_summary"], "中文摘要")
+
     def test_sources_can_require_token_and_partition_skips_without_token(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "sources.yml"
@@ -105,6 +140,20 @@ sources:
     tier: T2
     weight: 2
     requires_x_token: true
+  - id: youtube
+    name: YouTube API
+    type: youtube_search
+    url: local://youtube-search?q=ComfyUI
+    category: community
+    tier: T2
+    weight: 2
+  - id: discord-bridge
+    name: Discord bridge
+    type: discord_feed
+    url: env://DISCORD_COMFYUI_FEED_URL
+    category: community
+    tier: T2
+    weight: 2
 """,
                 encoding="utf-8",
             )
@@ -112,15 +161,18 @@ sources:
             previous_token = settings.github_token
             previous_x_token = settings.x_bearer_token
             previous_x_browser_search = settings.x_browser_search
+            previous_youtube_key = settings.youtube_api_key
             try:
                 object.__setattr__(settings, "github_token", None)
                 object.__setattr__(settings, "x_bearer_token", None)
                 object.__setattr__(settings, "x_browser_search", "off")
+                object.__setattr__(settings, "youtube_api_key", None)
                 active, skipped = partition_sources(sources)
             finally:
                 object.__setattr__(settings, "github_token", previous_token)
                 object.__setattr__(settings, "x_bearer_token", previous_x_token)
                 object.__setattr__(settings, "x_browser_search", previous_x_browser_search)
+                object.__setattr__(settings, "youtube_api_key", previous_youtube_key)
 
             self.assertEqual([source.id for source in active], ["atom"])
             self.assertEqual(skipped[0]["id"], "github-rest")
@@ -128,6 +180,10 @@ sources:
             self.assertEqual(skipped[0]["reason"], "requires GITHUB_TOKEN")
             self.assertEqual(skipped[1]["id"], "x-api")
             self.assertEqual(skipped[1]["reason"], "requires X_BEARER_TOKEN or running X browser debug endpoint")
+            self.assertEqual(skipped[2]["id"], "youtube")
+            self.assertEqual(skipped[2]["reason"], "requires YOUTUBE_API_KEY")
+            self.assertEqual(skipped[3]["id"], "discord-bridge")
+            self.assertEqual(skipped[3]["reason"], "requires DISCORD_COMFYUI_FEED_URL")
 
     def test_x_source_can_use_browser_debug_fallback_when_enabled(self) -> None:
         previous_x_token = settings.x_bearer_token
@@ -188,8 +244,110 @@ sources:
 
             self.assertEqual(storage.count_items(channel="x"), 1)
             self.assertEqual(storage.count_items(channel="bilibili"), 1)
+            storage.upsert_items(
+                [
+                    make_item("hf", "HF model", source_type="huggingface_models", category="models"),
+                    make_item("yt", "YouTube model", source_type="youtube_search", category="community"),
+                    make_item("discord", "Discord model", source_type="discord_feed", category="community"),
+                    make_item("forum", "Forum model", source_type="forum_json", category="community"),
+                ]
+            )
+            self.assertEqual(storage.count_items(channel="models"), 1)
+            self.assertEqual(storage.count_items(channel="youtube"), 1)
+            self.assertEqual(storage.count_items(channel="discord"), 1)
+            self.assertEqual(storage.count_items(channel="forum"), 1)
             self.assertEqual(storage.list_items(channel="x", limit=5)[0]["guid"], "x")
             self.assertEqual(storage.list_items(channel="bilibili", limit=5)[0]["guid"], "bili")
+
+    def test_json_feed_helpers_support_discord_and_forum_shapes(self) -> None:
+        source = Source(
+            id="discord-comfyui-feed",
+            name="Discord bridge",
+            type="discord_feed",
+            url="env://DISCORD_COMFYUI_FEED_URL",
+            category="community",
+            weight=2,
+            tier="T2",
+        )
+        previous_url = os.environ.get("DISCORD_COMFYUI_FEED_URL")
+        previous_token = os.environ.get("DISCORD_COMFYUI_FEED_TOKEN")
+        try:
+            os.environ["DISCORD_COMFYUI_FEED_URL"] = "https://example.com/feed.json"
+            os.environ["DISCORD_COMFYUI_FEED_TOKEN"] = "local-token"
+            self.assertEqual(source_url_env_name(source.url), "DISCORD_COMFYUI_FEED_URL")
+            self.assertEqual(resolve_source_url(source.url), "https://example.com/feed.json")
+            self.assertEqual(json_feed_headers(source), {"Authorization": "Bearer local-token"})
+        finally:
+            if previous_url is None:
+                os.environ.pop("DISCORD_COMFYUI_FEED_URL", None)
+            else:
+                os.environ["DISCORD_COMFYUI_FEED_URL"] = previous_url
+            if previous_token is None:
+                os.environ.pop("DISCORD_COMFYUI_FEED_TOKEN", None)
+            else:
+                os.environ["DISCORD_COMFYUI_FEED_TOKEN"] = previous_token
+
+        rows = json_feed_rows(
+            {
+                "messages": [
+                    {
+                        "text": "ComfyUI Flux model release adds GGUF workflow support",
+                        "jump_url": "/channels/1/2/3",
+                        "views": "1.2K",
+                        "reactions": [{"count": 4}],
+                        "reply_count": 2,
+                    }
+                ]
+            }
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(json_row_url(rows[0], "https://bridge.example/feed.json"), "https://bridge.example/channels/1/2/3")
+        self.assertEqual(json_row_engagement(rows[0])["weighted"], 24)
+
+        discourse_rows = json_feed_rows({"topic_list": {"topics": [{"id": 9, "slug": "flux-update"}]}})
+        self.assertEqual(json_row_url(discourse_rows[0], "https://forum.example/latest.json"), "https://forum.example/t/flux-update/9")
+
+    def test_fetch_json_feed_builds_news_items(self) -> None:
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(
+                    b'{"items":[{"title":"ComfyUI Flux model release","content":"New Flux LoRA workflow update with GGUF node support.","url":"https://example.com/item","published_at":"2026-06-01T12:00:00Z","author":{"username":"tester"},"views":1000,"likes":10}]}'
+                )
+
+            def log_message(self, format: str, *args: object) -> None:
+                return
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        source = Source(
+            id="forum-json",
+            name="Forum JSON",
+            type="forum_json",
+            url=f"http://127.0.0.1:{server.server_address[1]}/feed.json",
+            category="community",
+            weight=2,
+            tier="T2",
+        )
+        async def run_fetch() -> list[NewsItem]:
+            fetcher = Fetcher()
+            try:
+                return await fetcher.fetch_source(source, {"include": ["comfyui", "flux", "gguf"], "exclude": []})
+            finally:
+                await fetcher.close()
+
+        try:
+            items = asyncio.run(run_fetch())
+        finally:
+            server.shutdown()
+            server.server_close()
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].author, "tester")
+        self.assertGreaterEqual(items[0].score, 60)
 
     def test_x_browser_text_helpers_match_article_shape(self) -> None:
         raw = "Author Name\n@handle\nTranslate post\n· 23m\nReplying to @someone and 2 others\nComfyUI Flux model release\nShow more"
@@ -199,6 +357,10 @@ sources:
         self.assertEqual(tweet_body(cleaned), "ComfyUI Flux model release")
         self.assertNotIn("Translate post", cleaned)
         self.assertIn("since:", x_browser_query("ComfyUI Flux"))
+        self.assertEqual(parse_compact_count("1.2K"), 1200)
+        self.assertEqual(parse_compact_count("3万"), 30000)
+        self.assertEqual(x_interaction_count({"like_count": 10, "retweet_count": 2, "reply_count": 1}), 18)
+        self.assertTrue(author_is_allowlisted("@ComfyUI", "comfyui,other"))
 
     def test_bilibili_search_terms_expand_news_topics(self) -> None:
         terms = bilibili_search_terms("ComfyUI 新模型 视频模型 节点 Flux Wan Qwen")

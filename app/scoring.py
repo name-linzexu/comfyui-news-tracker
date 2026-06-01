@@ -454,7 +454,7 @@ def social_quality_adjustment(text: str) -> int:
 
 
 def is_social_source_type(source_type: str) -> bool:
-    return source_type in {"bilibili_search", "x_search"}
+    return source_type in {"bilibili_search", "x_search", "discord_feed", "forum_json", "json_feed"}
 
 
 def extract_tags(title: str, summary: str, source_category: str) -> list[str]:
@@ -475,6 +475,8 @@ def score_item(
     source_tier: str,
     tags: Iterable[str],
     github_stars: int | None = None,
+    interaction_count: int | None = None,
+    trusted_author: bool = False,
 ) -> int:
     total = sum(
         score_breakdown(
@@ -485,6 +487,8 @@ def score_item(
             source_tier=source_tier,
             tags=tags,
             github_stars=github_stars,
+            interaction_count=interaction_count,
+            trusted_author=trusted_author,
         ).values()
     )
     return max(0, min(total, 100))
@@ -499,6 +503,8 @@ def score_breakdown(
     source_tier: str,
     tags: Iterable[str],
     github_stars: int | None = None,
+    interaction_count: int | None = None,
+    trusted_author: bool = False,
 ) -> dict[str, int]:
     text = f"{title} {summary}".lower()
     source_score = source_weight * 10
@@ -510,8 +516,12 @@ def score_breakdown(
         source_score = min(source_score, 12)
     elif source_type == "github_issues":
         source_score = min(source_score, 10)
-    elif source_type in {"bilibili_search", "x_search"}:
+    elif source_type in {"bilibili_search", "x_search", "discord_feed", "forum_json", "json_feed"}:
         source_score += 12
+    elif source_type in {"huggingface_models", "civitai_models"}:
+        source_score += 10
+    elif source_type in {"youtube_search", "youtube_rss"}:
+        source_score += 6
 
     relevance = 0
     for needle in HIGH_SIGNAL:
@@ -519,8 +529,12 @@ def score_breakdown(
             relevance += 8
     if source_type == "github_search_repos":
         relevance = min(relevance, 24)
-    elif source_type in {"bilibili_search", "x_search"}:
+    elif source_type in {"bilibili_search", "x_search", "discord_feed", "forum_json", "json_feed"}:
         relevance += 8
+    elif source_type in {"huggingface_models", "civitai_models"}:
+        relevance += 12
+    elif source_type in {"youtube_search", "youtube_rss"}:
+        relevance += 6
 
     penalty = 0
     for needle in LOW_SIGNAL:
@@ -539,6 +553,8 @@ def score_breakdown(
     authority = 0
     if "official" in tag_set:
         authority += 16
+    if trusted_author:
+        authority += 14
 
     impact = 0
     if "breaking" in tag_set:
@@ -565,12 +581,18 @@ def score_breakdown(
         freshness -= 10
     if is_social_source_type(source_type):
         freshness += 10
+    if source_type in {"huggingface_models", "civitai_models"}:
+        freshness += 12
+    if source_type in {"youtube_search", "youtube_rss"}:
+        freshness += 6
     if source_type == "rss" and source_tier == "T1":
         freshness += 8
 
     popularity = 0
     if github_stars and source_type != "github_search_repos":
         popularity += min(20, github_stars // 500)
+    if interaction_count:
+        popularity += min(20, int(interaction_count) // 100)
     if source_type == "github_search_repos":
         penalty -= 35
     if source_type == "github_issues":

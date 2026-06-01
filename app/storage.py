@@ -5,6 +5,7 @@ import re
 import sqlite3
 from collections.abc import Iterable
 from contextlib import contextmanager
+from dataclasses import replace
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -185,12 +186,13 @@ class Storage:
                 existing = conn.execute(
                     """
                     SELECT title, summary, url, published_at, score, featured, tags,
-                           source_tier, reason, score_breakdown, cluster_key, cluster_title, author
+                           source_tier, reason, score_breakdown, cluster_key, cluster_title, author, raw
                     FROM items
                     WHERE guid = ?
                     """,
                     (item.guid,),
                 ).fetchone()
+                item = self._merge_existing_enrichment(existing, item)
                 values = self._item_values(item)
                 conn.execute(
                     """
@@ -1034,6 +1036,29 @@ class Storage:
             clauses.append("i.source_type = 'x_search'")
         elif channel == "bilibili":
             clauses.append("i.source_type = 'bilibili_search'")
+        elif channel == "youtube":
+            clauses.append("i.source_type IN ('youtube_search', 'youtube_rss')")
+        elif channel == "models":
+            clauses.append("i.source_type IN ('huggingface_models', 'civitai_models')")
+        elif channel == "discord":
+            clauses.append("i.source_type = 'discord_feed'")
+        elif channel == "forum":
+            clauses.append("i.source_type IN ('forum_json', 'json_feed')")
+
+    @staticmethod
+    def _merge_existing_enrichment(row: sqlite3.Row | None, item: NewsItem) -> NewsItem:
+        if row is None:
+            return item
+        try:
+            existing_raw = json.loads(row["raw"] or "{}")
+        except (KeyError, TypeError, json.JSONDecodeError):
+            return item
+        llm = existing_raw.get("llm") if isinstance(existing_raw, dict) else None
+        if not llm:
+            return item
+        raw = dict(item.raw or {})
+        raw.setdefault("llm", llm)
+        return replace(item, raw=raw)
 
     @staticmethod
     def _row_changed(row: sqlite3.Row, item: NewsItem) -> bool:

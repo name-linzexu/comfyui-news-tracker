@@ -2,8 +2,12 @@
 __pycache__/
 **/__pycache__/
 *.py[cod]
+.secrets/
+scripts/.chrome-x-debug-profile/
+**/.chrome-x-debug-profile/
 data/*.sqlite3
 data/*.sqlite3-*
 data/digests/
 data/logs/
+data/secrets/
 .env

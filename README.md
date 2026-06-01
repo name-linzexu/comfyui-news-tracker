@@ -70,6 +70,36 @@ $env:BILIBILI_COOKIE = "<your-bilibili-cookie>"
 .\run.ps1
 ```
 
+可以给 X / Bilibili 设作者白名单，白名单作者会得到 authority 加权；互动指标会从 X API、Bilibili 搜索结果、YouTube API、Hugging Face / Civitai 统计中自动进入 popularity 加权：
+
+```powershell
+$env:X_AUTHOR_ALLOWLIST = "ComfyUI,comfyanonymous,kijai"
+$env:BILIBILI_AUTHOR_ALLOWLIST = "作者A,作者B"
+```
+
+YouTube 搜索需要 API key；未配置时会自动跳过，不算失败：
+
+```powershell
+$env:YOUTUBE_API_KEY = "<your-youtube-api-key>"
+```
+
+Civitai 公共接口默认可用；如果遇到限流，可以配置 token：
+
+```powershell
+$env:CIVITAI_TOKEN = "<your-civitai-token>"
+```
+
+Discord / forum sources use local JSON bridges. Keep bridge URLs and tokens in environment variables or ignored local files, not in Git:
+
+```powershell
+$env:DISCORD_COMFYUI_FEED_URL = "https://your-bridge.example/discord-comfyui.json"
+$env:COMFYUI_FORUM_JSON_URL = "https://forum.example/latest.json"
+$env:DISCORD_COMFYUI_FEED_TOKEN = "<your-bridge-token>"
+$env:FORUM_COMFYUI_JSON_AUTHORIZATION = "Bearer <your-bridge-token>"
+```
+
+Secrets can also be stored in ignored local files such as `.secrets/bilibili_cookie.txt`, `.secrets/x_bearer_token.txt`, `.secrets/youtube_api_key.txt`, `.secrets/civitai_token.txt`, and `.secrets/openai_api_key.txt`. Environment variables still take priority.
+
 ## 低 token 固定流程
 
 本地脚本抓取、入库、重打分、导出日报本身不消耗 Codex/OpenAI 对话 token。消耗 token 的是让 Codex 在聊天里替你阅读网页、分析结果、总结日志或继续改代码。日常使用建议直接跑下面这些固定脚本，把重复动作留在本机完成。
@@ -103,6 +133,24 @@ $env:BILIBILI_COOKIE = "<your-bilibili-cookie>"
 ```powershell
 .\scripts\collect.ps1 -IncludeType bilibili_search
 .\scripts\collect.ps1 -IncludeType x_search
+```
+
+只抓模型平台或 YouTube：
+
+```powershell
+.\scripts\collect.ps1 -IncludeType huggingface_models
+.\scripts\collect.ps1 -IncludeType civitai_models
+.\scripts\collect.ps1 -IncludeType youtube_search
+.\scripts\collect.ps1 -IncludeType discord_feed
+.\scripts\collect.ps1 -IncludeType forum_json
+```
+
+可选 LLM 后处理默认不运行，只有显式设置 `OPENAI_API_KEY` 并运行脚本才会消耗 API。它会给高分条目生成中文摘要、中文标题和更稳定的聚类键：
+
+```powershell
+$env:OPENAI_API_KEY = "<your-openai-api-key>"
+$env:COMFYUI_NEWS_LLM_MODEL = "gpt-4.1-mini"
+.\.venv\Scripts\python.exe scripts\llm_enrich.py --limit 20
 ```
 
 只启动 Web 服务：
@@ -241,6 +289,12 @@ POST /api/feedback
 - `rss`
 - `bilibili_search`
 - `x_search`
+- `huggingface_models`
+- `civitai_models`
+- `youtube_search`
+- `discord_feed`
+- `forum_json`
+- `json_feed`
 
 默认精选不会把 `github_search_repos` 这类代码仓库发现结果当成新闻主线；它们主要留在全量搜索里供溯源。默认动态更偏向 X、Bilibili、官方发布、模型节点支持、工作流教程、LoRA/量化/性能变化。
 

@@ -23,7 +23,7 @@ storage = Storage()
 
 app.mount("/static", StaticFiles(directory=settings.static_dir), name="static")
 
-CHANNEL_PATTERN = "^(official|github|rss|community|releases|x|bilibili)$"
+CHANNEL_PATTERN = "^(official|github|rss|community|releases|x|bilibili|youtube|models|discord|forum)$"
 MODE_PATTERN = "^(selected|all|daily)$"
 SORT_PATTERN = "^(score|latest)$"
 DEFAULT_NEWS_HOURS = 24 * 7

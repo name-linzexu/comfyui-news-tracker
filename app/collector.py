@@ -9,7 +9,7 @@ import httpx
 from .digest import render_markdown_digest, webhook_payload
 from .models import NewsItem
 from .settings import settings
-from .sources import Fetcher, Source, load_sources
+from .sources import Fetcher, Source, load_sources, resolve_source_url, source_url_env_name
 from .storage import Storage, utc_now
 
 
@@ -183,6 +183,13 @@ def partition_sources(sources: list[Source]) -> tuple[list[Source], list[dict[st
             continue
         if source.requires_x_token and should_skip_x_source_without_bearer():
             skipped.append(skipped_source_result(source, "requires X_BEARER_TOKEN or running X browser debug endpoint"))
+            continue
+        if source.type == "youtube_search" and not settings.youtube_api_key:
+            skipped.append(skipped_source_result(source, "requires YOUTUBE_API_KEY"))
+            continue
+        if source.type in {"json_feed", "discord_feed", "forum_json"} and not resolve_source_url(source.url):
+            env_name = source_url_env_name(source.url) or "feed URL"
+            skipped.append(skipped_source_result(source, f"requires {env_name}"))
             continue
         active.append(source)
     return active, skipped

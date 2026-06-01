@@ -299,6 +299,30 @@ class ScoringTests(unittest.TestCase):
         self.assertTrue(is_low_value_bilibili_text("每日分享三个超变态的Ai 工作流 模板"))
         self.assertTrue(is_low_value_bilibili_text("2026新版 ComfyUI 整合包 Win+Mac一键安装 全套工作流"))
 
+    def test_social_trusted_author_and_engagement_boost_score(self) -> None:
+        tags = ["community", "model", "workflow"]
+        plain = score_breakdown(
+            title="ComfyUI Flux workflow",
+            summary="Flux LoRA workflow notes with GGUF nodes.",
+            source_weight=2,
+            source_type="x_search",
+            source_tier="T2",
+            tags=tags,
+        )
+        boosted = score_breakdown(
+            title="ComfyUI Flux workflow",
+            summary="Flux LoRA workflow notes with GGUF nodes.",
+            source_weight=2,
+            source_type="x_search",
+            source_tier="T2",
+            tags=tags,
+            interaction_count=800,
+            trusted_author=True,
+        )
+
+        self.assertGreater(boosted["authority"], plain["authority"])
+        self.assertGreater(boosted["popularity"], plain["popularity"])
+
 
 class SourceBuildTests(unittest.TestCase):
     def test_build_item_populates_reason_breakdown_and_cluster(self) -> None:
@@ -335,6 +359,31 @@ class SourceBuildTests(unittest.TestCase):
             "https://github.com/Deno2026/comfyui-deno-custom-nodes",
         )
         self.assertEqual(key, "github:deno2026/comfyui-deno-custom-nodes")
+
+    def test_model_sources_build_featured_items(self) -> None:
+        source = Source(
+            id="huggingface-comfyui-models",
+            name="Hugging Face ComfyUI model search",
+            type="huggingface_models",
+            url="local://huggingface-models?q=Flux",
+            category="models",
+            weight=3,
+            tier="T2",
+        )
+        item = build_item(
+            source=source,
+            title="Hugging Face model: author/flux-comfyui-lora",
+            summary="ComfyUI Flux LoRA safetensors model weights for image generation.",
+            url="https://huggingface.co/author/flux-comfyui-lora",
+            published_at=None,
+            keywords={"include": ["comfyui", "flux", "lora"], "exclude": []},
+            raw={"engagement": {"weighted": 500}},
+        )
+
+        self.assertIsNotNone(item)
+        assert item is not None
+        self.assertTrue(item.featured)
+        self.assertEqual(item.cluster_key, "hf:author/flux-comfyui-lora")
 
 
 if __name__ == "__main__":

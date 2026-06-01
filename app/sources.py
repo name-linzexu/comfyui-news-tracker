@@ -3,13 +3,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import html
+import os
 import re
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from urllib.parse import parse_qs, quote, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qs, quote, urlencode, urljoin, urlsplit, urlunsplit
 from typing import Any
 
 import feedparser
@@ -163,6 +164,12 @@ def load_sources(path: Path = settings.sources_path) -> tuple[list[Source], dict
     return sources, keywords
 
 
+def env_csv(value: str | None) -> set[str]:
+    if not value:
+        return set()
+    return {part.strip().lower().lstrip("@") for part in re.split(r"[,;\s]+", value) if part.strip()}
+
+
 class Fetcher:
     def __init__(self) -> None:
         headers = {"User-Agent": settings.user_agent}
@@ -191,6 +198,14 @@ class Fetcher:
                 return await self._fetch_bilibili_search_v2(source, keywords)
             if source.type == "x_search":
                 return await self._fetch_x_search(source, keywords)
+            if source.type == "huggingface_models":
+                return await self._fetch_huggingface_models(source, keywords)
+            if source.type == "civitai_models":
+                return await self._fetch_civitai_models(source, keywords)
+            if source.type == "youtube_search":
+                return await self._fetch_youtube_search(source, keywords)
+            if source.type in {"json_feed", "discord_feed", "forum_json"}:
+                return await self._fetch_json_feed(source, keywords)
         except Exception as exc:
             raise SourceFetchError(f"{source.id}: {exc}") from exc
         raise SourceFetchError(f"{source.id}: unsupported source type {source.type}")
@@ -209,6 +224,8 @@ class Fetcher:
         host = (urlsplit(url).hostname or "").lower()
         if host == "api.github.com" and settings.github_token:
             return {"Authorization": f"Bearer {settings.github_token}"}
+        if host.endswith("civitai.com") and settings.civitai_token:
+            return {"Authorization": f"Bearer {settings.civitai_token}"}
         return {}
 
     async def _fetch_rss(self, source: Source, keywords: dict[str, list[str]]) -> list[NewsItem]:
@@ -450,6 +467,22 @@ class Fetcher:
         if url in seen:
             return None
         seen.add(url)
+        play = int(video.get("play") or 0)
+        favorites = int(video.get("favorites") or 0)
+        review = int(video.get("review") or 0)
+        interaction_count = play // 100 + favorites * 3 + review * 2
+        author = video.get("author")
+        trusted_author = author_is_allowlisted(author, settings.bilibili_author_allowlist)
+        raw = {
+            **video,
+            "engagement": {
+                "views": play,
+                "favorites": favorites,
+                "comments": review,
+                "weighted": interaction_count,
+            },
+            "trusted_author": trusted_author,
+        }
         return build_item(
             source=source,
             title=title,
@@ -457,8 +490,10 @@ class Fetcher:
             url=url,
             published_at=parse_unix_datetime(video.get("pubdate")),
             keywords=keywords,
-            author=video.get("author"),
-            raw=video,
+            author=author,
+            raw=raw,
+            interaction_count=interaction_count,
+            trusted_author=trusted_author,
         )
 
     async def _fetch_bilibili_search_v3(self, source: Source, keywords: dict[str, list[str]]) -> list[NewsItem]:
@@ -506,6 +541,196 @@ class Fetcher:
             return await self._fetch_x_browser_search(source, keywords)
         raise SourceFetchError(f"{source.id}: requires X_BEARER_TOKEN or running X browser debug endpoint")
 
+    async def _fetch_huggingface_models(self, source: Source, keywords: dict[str, list[str]]) -> list[NewsItem]:
+        query = parse_source_query(source.url) or "ComfyUI"
+        params = {
+            "search": query,
+            "sort": "lastModified",
+            "direction": "-1",
+            "limit": "30",
+            "full": "true",
+        }
+        response = await self.client.get("https://huggingface.co/api/models", params=params)
+        response.raise_for_status()
+        items: list[NewsItem] = []
+        for model in response.json()[:30]:
+            if not isinstance(model, dict):
+                continue
+            model_id = model.get("modelId") or model.get("id") or ""
+            if not model_id:
+                continue
+            tags = model.get("tags") or []
+            downloads = int(model.get("downloads") or 0)
+            likes = int(model.get("likes") or 0)
+            summary = huggingface_model_summary(model, downloads=downloads, likes=likes)
+            item = build_item(
+                source=source,
+                title=f"Hugging Face model: {model_id}",
+                summary=summary,
+                url=f"https://huggingface.co/{model_id}",
+                published_at=parse_datetime(model.get("lastModified") or model.get("createdAt")),
+                keywords=keywords,
+                author=str(model_id).split("/")[0],
+                raw={
+                    **model,
+                    "engagement": {"downloads": downloads, "likes": likes, "weighted": downloads // 50 + likes * 2},
+                },
+                interaction_count=downloads // 50 + likes * 2,
+            )
+            if item:
+                items.append(item)
+        return items
+
+    async def _fetch_civitai_models(self, source: Source, keywords: dict[str, list[str]]) -> list[NewsItem]:
+        query = parse_source_query(source.url) or "ComfyUI"
+        params = {
+            "query": query,
+            "sort": "Newest",
+            "period": "Month",
+            "limit": "50",
+        }
+        response = await self.client.get(
+            "https://civitai.com/api/v1/models",
+            params=params,
+            headers=self._headers_for("https://civitai.com/api/v1/models"),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        items: list[NewsItem] = []
+        for model in (payload.get("items") or [])[:40]:
+            if not isinstance(model, dict):
+                continue
+            title = model.get("name") or "Civitai model"
+            creator = (model.get("creator") or {}).get("username")
+            stats = model.get("stats") or {}
+            versions = model.get("modelVersions") or []
+            latest_version = versions[0] if versions and isinstance(versions[0], dict) else {}
+            interaction_count = (
+                int(stats.get("downloadCount") or 0) // 20
+                + int(stats.get("thumbsUpCount") or 0) * 2
+                + int(stats.get("commentCount") or 0) * 2
+            )
+            item = build_item(
+                source=source,
+                title=f"Civitai model: {title}",
+                summary=clean_html(
+                    f"{model.get('description') or ''} Type: {model.get('type') or 'model'}. "
+                    f"Latest version: {latest_version.get('name') or ''}."
+                ),
+                url=f"https://civitai.com/models/{model.get('id')}",
+                published_at=parse_datetime(
+                    latest_version.get("publishedAt")
+                    or latest_version.get("createdAt")
+                    or model.get("publishedAt")
+                    or model.get("createdAt")
+                ),
+                keywords=keywords,
+                author=creator,
+                raw={**model, "engagement": {**stats, "weighted": interaction_count}},
+                interaction_count=interaction_count,
+            )
+            if item:
+                items.append(item)
+        return items
+
+    async def _fetch_youtube_search(self, source: Source, keywords: dict[str, list[str]]) -> list[NewsItem]:
+        query = parse_source_query(source.url) or "ComfyUI model workflow"
+        if not settings.youtube_api_key:
+            raise SourceFetchError(f"{source.id}: requires YOUTUBE_API_KEY")
+        search_params = {
+            "key": settings.youtube_api_key,
+            "part": "snippet",
+            "q": query,
+            "type": "video",
+            "order": "date",
+            "maxResults": "25",
+        }
+        response = await self.client.get("https://www.googleapis.com/youtube/v3/search", params=search_params)
+        response.raise_for_status()
+        payload = response.json()
+        video_ids = [
+            str((item.get("id") or {}).get("videoId"))
+            for item in payload.get("items", [])
+            if (item.get("id") or {}).get("videoId")
+        ]
+        stats_by_id: dict[str, dict[str, Any]] = {}
+        if video_ids:
+            stats_response = await self.client.get(
+                "https://www.googleapis.com/youtube/v3/videos",
+                params={
+                    "key": settings.youtube_api_key,
+                    "part": "statistics",
+                    "id": ",".join(video_ids),
+                },
+            )
+            stats_response.raise_for_status()
+            stats_by_id = {
+                item.get("id"): item.get("statistics") or {}
+                for item in stats_response.json().get("items", [])
+                if item.get("id")
+            }
+        items: list[NewsItem] = []
+        for row in payload.get("items", []):
+            snippet = row.get("snippet") or {}
+            video_id = (row.get("id") or {}).get("videoId")
+            if not video_id:
+                continue
+            stats = stats_by_id.get(video_id, {})
+            interaction_count = (
+                int(stats.get("viewCount") or 0) // 100
+                + int(stats.get("likeCount") or 0) * 2
+                + int(stats.get("commentCount") or 0) * 2
+            )
+            item = build_item(
+                source=source,
+                title=f"YouTube: {clean_html(snippet.get('title') or 'ComfyUI video')}",
+                summary=clean_html(snippet.get("description") or ""),
+                url=f"https://www.youtube.com/watch?v={video_id}",
+                published_at=parse_datetime(snippet.get("publishedAt")),
+                keywords=keywords,
+                author=snippet.get("channelTitle"),
+                raw={**row, "statistics": stats, "engagement": {**stats, "weighted": interaction_count}},
+                interaction_count=interaction_count,
+            )
+            if item:
+                items.append(item)
+        return items
+
+    async def _fetch_json_feed(self, source: Source, keywords: dict[str, list[str]]) -> list[NewsItem]:
+        feed_url = resolve_source_url(source.url)
+        if not feed_url:
+            env_name = source_url_env_name(source.url) or "feed URL"
+            raise SourceFetchError(f"{source.id}: requires {env_name}")
+        response = await self.client.get(feed_url, headers={**self._headers_for(feed_url), **json_feed_headers(source)})
+        response.raise_for_status()
+        payload = response.json()
+        rows = json_feed_rows(payload)
+        items: list[NewsItem] = []
+        seen: set[str] = set()
+        for row in rows[:80]:
+            title = json_row_title(row, source)
+            summary = json_row_summary(row)
+            url = json_row_url(row, feed_url) or source.url
+            if url in seen:
+                continue
+            seen.add(url)
+            engagement = json_row_engagement(row)
+            interaction_count = interaction_count_from_raw({"engagement": engagement})
+            item = build_item(
+                source=source,
+                title=title,
+                summary=summary,
+                url=url,
+                published_at=json_row_published(row),
+                keywords=keywords,
+                author=json_row_author(row),
+                raw=json_row_raw(row, engagement),
+                interaction_count=interaction_count,
+            )
+            if item:
+                items.append(item)
+        return items
+
     async def _fetch_x_api_search(self, source: Source, keywords: dict[str, list[str]]) -> list[NewsItem]:
         query = parse_source_query(source.url)
         if not query:
@@ -538,6 +763,21 @@ class Fetcher:
             user = users.get(tweet.get("author_id") or "", {})
             username = user.get("username") or tweet.get("author_id") or "x"
             url = f"https://x.com/{username}/status/{tweet.get('id')}"
+            metrics = tweet.get("public_metrics") or {}
+            interaction_count = x_interaction_count(metrics)
+            trusted_author = author_is_allowlisted(username, settings.x_author_allowlist)
+            raw = {
+                **tweet,
+                "author": user,
+                "engagement": {
+                    "likes": int(metrics.get("like_count") or 0),
+                    "reposts": int(metrics.get("retweet_count") or 0),
+                    "replies": int(metrics.get("reply_count") or 0),
+                    "quotes": int(metrics.get("quote_count") or 0),
+                    "weighted": interaction_count,
+                },
+                "trusted_author": trusted_author,
+            }
             item = build_item(
                 source=source,
                 title=first_sentence(text),
@@ -546,7 +786,9 @@ class Fetcher:
                 published_at=parse_datetime(tweet.get("created_at")),
                 keywords=keywords,
                 author=username,
-                raw=tweet,
+                raw=raw,
+                interaction_count=interaction_count,
+                trusted_author=trusted_author,
             )
             if item:
                 items.append(item)
@@ -619,6 +861,14 @@ class Fetcher:
             body = tweet_body(text)
             if is_low_value_x_text(body) and not has_social_news_signal(body):
                 continue
+            trusted_author = author_is_allowlisted(author, settings.x_author_allowlist)
+            metrics = parse_x_browser_metrics(text)
+            interaction_count = x_interaction_count(metrics)
+            raw = {
+                **row,
+                "engagement": {**metrics, "weighted": interaction_count},
+                "trusted_author": trusted_author,
+            }
             item = build_item(
                 source=source,
                 title=first_sentence(body),
@@ -627,7 +877,9 @@ class Fetcher:
                 published_at=published,
                 keywords=keywords,
                 author=author,
-                raw=row,
+                raw=raw,
+                interaction_count=interaction_count,
+                trusted_author=trusted_author,
             )
             if item:
                 items.append(item)
@@ -645,6 +897,8 @@ def build_item(
     author: str | None = None,
     raw: dict[str, Any] | None = None,
     github_stars: int | None = None,
+    interaction_count: int | None = None,
+    trusted_author: bool = False,
 ) -> NewsItem | None:
     title = normalize_text(title)
     summary = summarize(summary)
@@ -666,6 +920,8 @@ def build_item(
         source_tier=source.tier,
         tags=tags,
         github_stars=github_stars,
+        interaction_count=interaction_count or interaction_count_from_raw(raw),
+        trusted_author=trusted_author or bool((raw or {}).get("trusted_author")),
     )
     score = score_item(
         title=title,
@@ -675,6 +931,8 @@ def build_item(
         source_tier=source.tier,
         tags=tags,
         github_stars=github_stars,
+        interaction_count=interaction_count or interaction_count_from_raw(raw),
+        trusted_author=trusted_author or bool((raw or {}).get("trusted_author")),
     )
     cluster_key = cluster_key_for(title, summary, url)
     reason = explain_item(
@@ -683,6 +941,8 @@ def build_item(
         source=source,
         tags=tags,
         github_stars=github_stars,
+        trusted_author=trusted_author or bool((raw or {}).get("trusted_author")),
+        interaction_count=interaction_count or interaction_count_from_raw(raw),
     )
     featured = is_featured_item(
         score=score,
@@ -898,7 +1158,7 @@ def is_featured_item(
             or (has_node_signal and has_release_signal)
             or any(word in text for word in ("manager", "security"))
     )
-    if source.type in {"bilibili_search", "x_search"}:
+    if source.type in {"bilibili_search", "x_search", "discord_feed", "forum_json", "json_feed"}:
         if source.type == "x_search" and is_low_value_x_text(text):
             return False
         if source.type == "bilibili_search" and is_low_value_bilibili_text(text):
@@ -910,10 +1170,25 @@ def is_featured_item(
                 and any(word in text for word in social_news_words)
                 and has_strong_social_news_signal(text)
             )
+        if source.type in {"discord_feed", "forum_json", "json_feed"}:
+            return (
+                score >= 60
+                and (has_model_signal or has_release_signal or has_node_signal)
+                and any(word in text for word in social_news_words)
+                and has_social_news_signal(text)
+            )
         return (
             score >= 58
             and (has_model_signal or has_release_signal or has_node_signal)
             and any(word in text for word in social_news_words)
+            and has_strong_social_news_signal(text)
+        )
+    if source.type in {"huggingface_models", "civitai_models"}:
+        return score >= 62 and (has_model_signal or has_release_signal)
+    if source.type in {"youtube_search", "youtube_rss"}:
+        return (
+            score >= 62
+            and (has_model_signal or has_release_signal or has_node_signal)
             and has_strong_social_news_signal(text)
         )
     if source.type.startswith("github_search"):
@@ -949,6 +1224,10 @@ def passes_keywords(title: str, summary: str, source: Source, keywords: dict[str
     excludes = [word.lower() for word in keywords.get("exclude", [])]
     if source.category in {"official", "tooling", "model_nodes", "models"}:
         include_ok = True
+    elif source.type in {"huggingface_models", "civitai_models"}:
+        include_ok = any(word in text for word in includes) or any(
+            word in text for word in ("flux", "wan", "qwen", "hunyuan", "ltx", "lora", "gguf", "safetensors")
+        )
     else:
         include_ok = any(word in text for word in includes)
     return include_ok and not any(word in text for word in excludes)
@@ -967,6 +1246,10 @@ def is_low_value_t2_item(
         return is_low_value_x_text(text) and not has_social_news_signal(text)
     if source.type == "bilibili_search":
         return is_low_value_bilibili_text(text)
+    if source.type == "youtube_search":
+        return is_low_value_social_text(text) and not has_social_news_signal(text)
+    if source.type in {"discord_feed", "forum_json", "json_feed"}:
+        return is_low_value_social_text(text) and not has_social_news_signal(text)
     if source.tier != "T2" or not source.type.startswith("github_search"):
         return False
     repo = raw or {}
@@ -998,6 +1281,242 @@ def canonical_url(url: str, source_id: str) -> str:
     return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), path, "", ""))
 
 
+def source_url_env_name(url: str) -> str | None:
+    if not url.startswith("env://"):
+        return None
+    name = url.removeprefix("env://").strip()
+    return name or None
+
+
+def resolve_source_url(url: str) -> str:
+    env_name = source_url_env_name(url)
+    if env_name:
+        return os.getenv(env_name, "").strip()
+    return url
+
+
+def json_feed_headers(source: Source) -> dict[str, str]:
+    prefix = re.sub(r"[^A-Z0-9]+", "_", source.id.upper()).strip("_")
+    headers: dict[str, str] = {}
+    authorization = os.getenv(f"{prefix}_AUTHORIZATION", "").strip()
+    token = os.getenv(f"{prefix}_TOKEN", "").strip()
+    if authorization:
+        headers["Authorization"] = authorization
+    elif token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def interaction_count_from_raw(raw: dict[str, Any] | None) -> int | None:
+    if not isinstance(raw, dict):
+        return None
+    engagement = raw.get("engagement")
+    if isinstance(engagement, dict):
+        value = engagement.get("weighted")
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def json_feed_rows(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        return [row for row in payload if isinstance(row, dict)]
+    if not isinstance(payload, dict):
+        return []
+    for key in ("items", "messages", "posts", "entries"):
+        rows = payload.get(key)
+        if isinstance(rows, list):
+            return [row for row in rows if isinstance(row, dict)]
+    topics = (payload.get("topic_list") or {}).get("topics")
+    if isinstance(topics, list):
+        return [{**row, "_feed_kind": "discourse_topic"} for row in topics if isinstance(row, dict)]
+    return []
+
+
+def json_row_title(row: dict[str, Any], source: Source) -> str:
+    for key in ("title", "name", "subject"):
+        value = row.get(key)
+        if value:
+            return clean_html(str(value))
+    summary = json_row_summary(row)
+    prefix = "Discord" if source.type == "discord_feed" else "Forum"
+    return f"{prefix}: {first_sentence(summary) or source.name}"
+
+
+def json_row_summary(row: dict[str, Any]) -> str:
+    for key in ("summary", "description", "content_text", "content_html", "content", "text", "body", "excerpt"):
+        value = row.get(key)
+        if value:
+            return clean_html(str(value))
+    return clean_html(str(row.get("title") or row.get("name") or ""))
+
+
+def json_row_url(row: dict[str, Any], feed_url: str) -> str:
+    for key in ("url", "external_url", "html_url", "permalink", "jump_url", "link"):
+        value = row.get(key)
+        if value:
+            return urljoin(feed_url, str(value))
+    if row.get("_feed_kind") == "discourse_topic" and row.get("id"):
+        base = discourse_base_url(feed_url)
+        slug = row.get("slug") or re.sub(r"[^a-z0-9]+", "-", str(row.get("title") or "topic").lower()).strip("-")
+        return f"{base}/t/{slug}/{row['id']}"
+    return ""
+
+
+def huggingface_model_summary(model: dict[str, Any], *, downloads: int, likes: int) -> str:
+    tags = [str(tag) for tag in model.get("tags") or []]
+    card_data = model.get("cardData") if isinstance(model.get("cardData"), dict) else {}
+    pipeline = model.get("pipeline_tag") or card_data.get("pipeline_tag")
+    license_name = model.get("license") or card_data.get("license")
+    base_model = card_data.get("base_model") or card_data.get("base_models")
+    parts = []
+    if pipeline:
+        parts.append(f"Pipeline: {pipeline}")
+    if base_model:
+        parts.append(f"Base model: {base_model}")
+    if license_name:
+        parts.append(f"License: {license_name}")
+    if tags:
+        parts.append("Tags: " + ", ".join(tags[:10]))
+    parts.append(f"Downloads: {downloads}")
+    parts.append(f"Likes: {likes}")
+    return ". ".join(parts) + "."
+
+
+def discourse_base_url(feed_url: str) -> str:
+    parts = urlsplit(feed_url)
+    path = re.sub(r"/(?:latest|top|new)\.json$", "", parts.path.rstrip("/"))
+    return urlunsplit((parts.scheme, parts.netloc, path, "", "")).rstrip("/")
+
+
+def json_row_published(row: dict[str, Any]) -> datetime | None:
+    for key in ("published_at", "date_published", "updated_at", "date_modified", "last_posted_at", "created_at", "timestamp"):
+        published = parse_datetime(str(row.get(key))) if row.get(key) else None
+        if published:
+            return published
+    return None
+
+
+def json_row_author(row: dict[str, Any]) -> str | None:
+    for key in ("author", "user", "creator"):
+        value = row.get(key)
+        if isinstance(value, dict):
+            name = value.get("username") or value.get("name") or value.get("display_name") or value.get("global_name")
+            if name:
+                return str(name)
+        elif value:
+            return str(value)
+    posters = row.get("posters")
+    if isinstance(posters, list) and posters:
+        first = posters[0]
+        if isinstance(first, dict) and first.get("user_id"):
+            return str(first["user_id"])
+    return None
+
+
+def json_row_engagement(row: dict[str, Any]) -> dict[str, int]:
+    likes = first_count(row, ("likes", "like_count", "likeCount", "thumbsUpCount", "reaction_count"))
+    replies = first_count(row, ("replies", "reply_count", "comments", "comment_count", "posts_count"))
+    views = first_count(row, ("views", "view_count", "viewCount"))
+    shares = first_count(row, ("shares", "share_count", "reposts", "retweets"))
+    reactions = reactions_count(row.get("reactions"))
+    weighted = views // 100 + (likes + reactions) * 2 + replies * 2 + shares * 3
+    return {
+        "views": views,
+        "likes": likes,
+        "reactions": reactions,
+        "replies": replies,
+        "shares": shares,
+        "weighted": weighted,
+    }
+
+
+def json_row_raw(row: dict[str, Any], engagement: dict[str, int]) -> dict[str, Any]:
+    return {
+        "id": row.get("id") or row.get("guid") or row.get("message_id"),
+        "channel": row.get("channel") or row.get("channel_name"),
+        "feed_kind": row.get("_feed_kind") or "json_feed",
+        "engagement": engagement,
+    }
+
+
+def first_count(row: dict[str, Any], keys: tuple[str, ...]) -> int:
+    for key in keys:
+        if key in row:
+            return coerce_count(row.get(key))
+    return 0
+
+
+def reactions_count(value: Any) -> int:
+    if isinstance(value, list):
+        total = 0
+        for item in value:
+            if isinstance(item, dict):
+                total += coerce_count(item.get("count", 1))
+            else:
+                total += 1
+        return total
+    return coerce_count(value)
+
+
+def coerce_count(value: Any) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    return parse_compact_count(str(value))
+
+
+def author_is_allowlisted(author: str | None, allowlist: str | None) -> bool:
+    if not author:
+        return False
+    normalized = author.lower().lstrip("@")
+    return normalized in env_csv(allowlist)
+
+
+def x_interaction_count(metrics: dict[str, Any]) -> int:
+    return (
+        int(metrics.get("like_count") or metrics.get("likes") or 0)
+        + int(metrics.get("retweet_count") or metrics.get("reposts") or 0) * 3
+        + int(metrics.get("reply_count") or metrics.get("replies") or 0) * 2
+        + int(metrics.get("quote_count") or metrics.get("quotes") or 0) * 2
+    )
+
+
+def parse_x_browser_metrics(text: str) -> dict[str, int]:
+    # X browser markup is localized and unstable; this parser only uses visible labels when present.
+    metrics = {"likes": 0, "reposts": 0, "replies": 0, "quotes": 0}
+    patterns = {
+        "likes": r"([\d,.万千kKmM]+)\s+(?:Likes?|喜欢)",
+        "reposts": r"([\d,.万千kKmM]+)\s+(?:Reposts?|Retweets?|转发)",
+        "replies": r"([\d,.万千kKmM]+)\s+(?:Replies?|回复)",
+        "quotes": r"([\d,.万千kKmM]+)\s+(?:Quotes?|引用)",
+    }
+    for key, pattern in patterns.items():
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            metrics[key] = parse_compact_count(match.group(1))
+    return metrics
+
+
+def parse_compact_count(value: str) -> int:
+    value = value.strip().replace(",", "")
+    multipliers = {"k": 1_000, "m": 1_000_000, "万": 10_000, "千": 1_000}
+    suffix = value[-1:].lower()
+    try:
+        if suffix in multipliers:
+            return int(float(value[:-1]) * multipliers[suffix])
+        return int(float(value))
+    except ValueError:
+        return 0
+
+
 def cluster_key_for(title: str, summary: str, url: str) -> str:
     parts = urlsplit(url)
     if parts.netloc.lower() == "github.com":
@@ -1006,6 +1525,21 @@ def cluster_key_for(title: str, summary: str, url: str) -> str:
             if len(segments) >= 4 and segments[2].lower() in {"commit", "issues", "pull", "releases"}:
                 return "github-event:" + "/".join(segment.lower() for segment in segments[:5])
             return f"github:{segments[0].lower()}/{segments[1].lower()}"
+    if parts.netloc.lower() == "huggingface.co":
+        segments = [segment for segment in parts.path.split("/") if segment]
+        if len(segments) >= 2:
+            return f"hf:{segments[0].lower()}/{segments[1].lower()}"
+    if "civitai.com" in parts.netloc.lower():
+        match = re.search(r"/models/(\d+)", parts.path)
+        if match:
+            return f"civitai:{match.group(1)}"
+    normalized = f"{title} {summary}".lower()
+    model_match = re.search(
+        r"\b(flux(?:\s*\d(?:\.\d)?)?|wan(?:\s*2(?:\.\d)?)?|qwen(?:[-\s]?image)?|hunyuan(?:video)?|ltx(?:[-\s]?video)?|z[-\s]?image|hidream)\b",
+        normalized,
+    )
+    if model_match:
+        return "model:" + normalize_text(model_match.group(1)).replace(" ", "-")
     text = f"{title} {summary}".lower()
     tokens = re.findall(r"[a-z0-9][a-z0-9._-]{2,}", text)
     stop = {
@@ -1039,6 +1573,8 @@ def explain_item(
     source: Source,
     tags: list[str],
     github_stars: int | None = None,
+    trusted_author: bool = False,
+    interaction_count: int | None = None,
 ) -> str:
     text = f"{title} {summary}".lower()
     reasons: list[str] = []
@@ -1068,6 +1604,10 @@ def explain_item(
         reasons.append("release mention")
     if github_stars and github_stars >= 100:
         reasons.append(f"{github_stars} GitHub stars")
+    if trusted_author:
+        reasons.append("trusted author")
+    if interaction_count and interaction_count >= 100:
+        reasons.append("high engagement")
     return ", ".join(reasons[:4]) or "matched ComfyUI keywords"
 
 

@@ -30,9 +30,18 @@ Optional authenticated sources:
 $env:GITHUB_TOKEN = "<your-github-token>"
 $env:X_BEARER_TOKEN = "<your-x-bearer-token>"
 $env:BILIBILI_COOKIE = "<your-bilibili-cookie>"
+$env:YOUTUBE_API_KEY = "<your-youtube-api-key>"
+$env:CIVITAI_TOKEN = "<your-civitai-token>"
+$env:DISCORD_COMFYUI_FEED_URL = "https://your-bridge.example/discord-comfyui.json"
+$env:COMFYUI_FORUM_JSON_URL = "https://forum.example/latest.json"
+$env:X_AUTHOR_ALLOWLIST = "ComfyUI,comfyanonymous,kijai"
+$env:BILIBILI_AUTHOR_ALLOWLIST = "作者A,作者B"
 ```
 
 Without `X_BEARER_TOKEN`, the tracker can use the logged-in browser fallback. Start it once with `.\scripts\start-x-debug.ps1`, log in to X in that Chrome profile, and keep the window running while refreshing. Set `X_BROWSER_SEARCH=off` to disable this fallback.
+YouTube search is skipped unless `YOUTUBE_API_KEY` is set. Hugging Face and Civitai model searches are available as `huggingface_models` and `civitai_models` source types.
+Discord and forum sources use JSON bridge URLs from `DISCORD_COMFYUI_FEED_URL` and `COMFYUI_FORUM_JSON_URL`; missing bridge URLs are treated as skipped sources. Keep credentials in environment variables or ignored `.secrets/*.txt` files.
+Optional LLM enrichment is deliberately manual; run `scripts/llm_enrich.py` only after setting `OPENAI_API_KEY`.
 
 ## Workflow
 
@@ -60,6 +69,10 @@ GET http://127.0.0.1:8787/api/public/items?mode=selected&channel=github&tier=T1.
 GET http://127.0.0.1:8787/api/public/items?mode=selected&category=model_nodes
 GET http://127.0.0.1:8787/api/public/items?mode=all&channel=x&q=Wan
 GET http://127.0.0.1:8787/api/public/items?mode=all&channel=bilibili&q=Wan
+GET http://127.0.0.1:8787/api/public/items?mode=all&channel=models&q=Flux
+GET http://127.0.0.1:8787/api/public/items?mode=all&channel=youtube&q=workflow
+GET http://127.0.0.1:8787/api/public/items?mode=all&channel=discord&q=Flux
+GET http://127.0.0.1:8787/api/public/items?mode=all&channel=forum&q=Flux
 GET http://127.0.0.1:8787/api/public/items?mode=all&q=ComfyUI-Manager:%20Flux%202
 GET http://127.0.0.1:8787/api/public/daily
 GET http://127.0.0.1:8787/api/public/daily/YYYY-MM-DD
@@ -139,7 +152,7 @@ http://127.0.0.1:8787/skill/comfyui-news/SKILL.md
 - Use `/api/source-wall` when the user asks which sources are covered or wants to audit coverage.
 - Use `/api/source-health` when the user asks whether the tracker is healthy or why coverage changed.
 - Check `/api/stats` `last_collect_result.webhook` when the user asks whether webhook delivery succeeded.
-- Treat `source_results[].status == "skipped"` with `reason == "requires GITHUB_TOKEN"` or `reason == "requires X_BEARER_TOKEN or running X browser debug endpoint"` as expected when credentials are not configured, not as failed sources.
+- Treat `source_results[].status == "skipped"` with `reason == "requires GITHUB_TOKEN"`, `reason == "requires X_BEARER_TOKEN or running X browser debug endpoint"`, or missing bridge/API key reasons as expected when credentials are not configured, not as failed sources.
 - Separate official updates, model nodes, tooling updates, custom nodes/workflows, models, X, Bilibili, and broader community discussions.
 - Include dates, source names, and links.
 - If data is stale or empty, refresh the service first and say when no matching updates were found.
