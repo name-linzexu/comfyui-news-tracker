@@ -4,13 +4,16 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ComfyUI News Tracker</title>
-    <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260602-ui" />
   </head>
   <body>
     <header class="topbar">
-      <div>
-        <h1>ComfyUI News Tracker</h1>
-        <p>Focused ComfyUI intelligence feed: model releases, image/video nodes, optimizations, workflows, and community signals.</p>
+      <div class="brand">
+        <div class="brand-mark">CN</div>
+        <div>
+          <h1>ComfyUI News Tracker</h1>
+          <p>Models, nodes, workflows, releases, and community signals.</p>
+        </div>
       </div>
       <div class="actions">
         <select id="themeSelect" class="theme-select" title="Theme">
@@ -28,8 +31,11 @@
 
     <main class="layout">
       <aside class="panel">
-        <section>
-          <h2>Filters</h2>
+        <section class="panel-section filters-panel">
+          <div class="panel-title">
+            <h2>Filters</h2>
+            <button id="clearFilters" class="ghost-button" type="button">Reset</button>
+          </div>
           <label class="field">
             <span>Keyword</span>
             <input id="searchInput" type="search" placeholder="Flux, Wan, Qwen Image, LoRA..." />
@@ -86,14 +92,14 @@
           </label>
         </section>
 
-        <section>
+        <section class="panel-section">
           <h2>Overview</h2>
           <div id="stats" class="stats"></div>
           <div id="runStatus" class="run-status"></div>
         </section>
 
-        <section>
-          <h2>Data access</h2>
+        <details class="panel-section compact-section">
+          <summary>Data access</summary>
           <div class="api-list">
             <a href="/api/public">Public API index</a>
             <a href="/api/public/items?mode=selected&take=30">Public selected</a>
@@ -114,10 +120,10 @@
             <a href="/rss/daily.xml">RSS daily</a>
             <a href="/rss/digests.xml">RSS digests</a>
           </div>
-        </section>
+        </details>
 
-        <section>
-          <h2>Suggest source</h2>
+        <details class="panel-section compact-section">
+          <summary>Suggest source</summary>
           <form id="sourceForm" class="stack-form">
             <input id="sourceName" type="text" placeholder="Source name" maxlength="120" required />
             <input id="sourceUrl" type="url" placeholder="https://..." maxlength="500" required />
@@ -126,17 +132,17 @@
             <button type="submit">Submit source</button>
             <p id="sourceFormStatus" class="form-status"></p>
           </form>
-        </section>
+        </details>
 
-        <section>
-          <h2>Feedback</h2>
+        <details class="panel-section compact-section">
+          <summary>Feedback</summary>
           <form id="feedbackForm" class="stack-form">
             <textarea id="feedbackMessage" placeholder="Coverage gaps, model/source misses, ranking issues, or UI notes" maxlength="2000" required></textarea>
             <input id="feedbackContact" type="text" placeholder="Contact (optional)" maxlength="120" />
             <button type="submit">Send feedback</button>
             <p id="feedbackStatus" class="form-status"></p>
           </form>
-        </section>
+        </details>
       </aside>
 
       <section class="feed">
@@ -145,10 +151,19 @@
             <h2>Latest Signals</h2>
             <p id="feedMeta">Loading</p>
           </div>
-          <div class="segmented" role="group" aria-label="Time range">
-            <button class="active" data-hours="">All</button>
-            <button data-hours="24">24h</button>
-            <button data-hours="168">7d</button>
+          <div class="feed-controls">
+            <div class="quick-channels" role="group" aria-label="Source channel shortcuts">
+              <button type="button" data-channel="">All</button>
+              <button type="button" data-channel="x">X</button>
+              <button type="button" data-channel="bilibili">Bilibili</button>
+              <button type="button" data-channel="models">Models</button>
+              <button type="button" data-channel="youtube">YouTube</button>
+            </div>
+            <div class="segmented" role="group" aria-label="Time range">
+              <button class="active" data-hours="">All</button>
+              <button data-hours="24">24h</button>
+              <button data-hours="168">7d</button>
+            </div>
           </div>
         </div>
         <div id="sourceWall" class="source-wall"></div>
@@ -176,6 +191,6 @@
       </section>
     </main>
 
-    <script src="/static/app.js"></script>
+    <script src="/static/app.js?v=20260602-ui"></script>
   </body>
 </html>

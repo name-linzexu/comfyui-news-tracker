@@ -58,6 +58,8 @@ const els = {
   feedbackMessage: document.querySelector("#feedbackMessage"),
   feedbackContact: document.querySelector("#feedbackContact"),
   feedbackStatus: document.querySelector("#feedbackStatus"),
+  clearFilters: document.querySelector("#clearFilters"),
+  quickChannels: [...document.querySelectorAll(".quick-channels button")],
 };
 
 const fmt = new Intl.DateTimeFormat("zh-CN", {
@@ -241,6 +243,7 @@ function setModeView() {
   els.clusters.hidden = isDaily;
   document.querySelector(".pagination").hidden = isDaily;
   document.querySelector(".segmented").hidden = isDaily;
+  document.querySelector(".quick-channels").hidden = isDaily;
 }
 
 function renderDailyDates() {
@@ -340,17 +343,20 @@ function renderItem(item) {
   const date = item.published_at ? fmt.format(new Date(item.published_at)) : "";
   const reason = item.reason ? `<p class="reason">${escapeHtml(item.reason)}</p>` : "";
   const breakdown = renderBreakdown(item.score_breakdown || {});
+  const sourceType = readableSourceType(item.source_type);
+  const scoreLabel = item.score >= 85 ? "High" : item.score >= 65 ? "Solid" : "Scan";
   node.innerHTML = `
     <div class="item-top">
       <div>
         <div class="badges">
           <span class="tier">${escapeHtml(item.source_tier || "T2")}</span>
+          <span class="source-chip">${escapeHtml(sourceType)}</span>
           ${item.featured ? '<span class="featured-badge">Featured</span>' : ""}
           ${isRead ? '<span class="read-badge">Read</span>' : ""}
         </div>
         <h3><a href="${escapeAttr(item.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(item.title)}</a></h3>
       </div>
-      <div class="score" title="Signal score">${item.score}</div>
+      <div class="score" title="Signal score"><b>${item.score}</b><span>${scoreLabel}</span></div>
     </div>
     ${reason}
     <p class="summary">${escapeHtml(item.summary || "No summary")}</p>
@@ -433,6 +439,21 @@ function applyTheme() {
   localStorage.setItem("comfyui-news-theme", state.theme);
 }
 
+function syncControls() {
+  els.search.value = state.q;
+  els.category.value = state.category;
+  els.channel.value = state.channel;
+  els.tier.value = state.tier;
+  els.sort.value = state.sort;
+  els.featured.checked = state.featured;
+  els.rangeButtons.forEach((button) => {
+    button.classList.toggle("active", (button.dataset.hours || "") === state.hours);
+  });
+  els.quickChannels.forEach((button) => {
+    button.classList.toggle("active", (button.dataset.channel || "") === state.channel);
+  });
+}
+
 function readUrlState() {
   const params = new URLSearchParams(window.location.search);
   const pathParts = window.location.pathname.split("/").filter(Boolean);
@@ -448,15 +469,7 @@ function readUrlState() {
   state.featured = params.has("featured") ? params.get("featured") === "true" : false;
   state.hours = params.has("hours") ? params.get("hours") || "" : "168";
   state.page = Math.max(1, Number.parseInt(params.get("page") || "1", 10) || 1);
-  els.search.value = state.q;
-  els.category.value = state.category;
-  els.channel.value = state.channel;
-  els.tier.value = state.tier;
-  els.sort.value = state.sort;
-  els.featured.checked = state.featured;
-  els.rangeButtons.forEach((button) => {
-    button.classList.toggle("active", (button.dataset.hours || "") === state.hours);
-  });
+  syncControls();
 }
 
 function syncUrl() {
@@ -537,6 +550,25 @@ function renderBreakdown(breakdown) {
   `;
 }
 
+function readableSourceType(sourceType) {
+  const labels = {
+    rss: "RSS",
+    x_search: "X",
+    bilibili_search: "Bilibili",
+    youtube_search: "YouTube",
+    huggingface_models: "HF",
+    civitai_models: "Civitai",
+    discord_feed: "Discord",
+    forum_json: "Forum",
+    json_feed: "JSON",
+    github_releases: "Release",
+    github_commits: "Commit",
+    github_search_repos: "Repo",
+    github_issues: "Issue",
+  };
+  return labels[sourceType] || sourceType || "Source";
+}
+
 async function refresh() {
   els.refresh.disabled = true;
   els.refresh.textContent = "Refreshing";
@@ -602,6 +634,7 @@ els.category.addEventListener("change", (event) => {
 els.channel.addEventListener("change", (event) => {
   state.channel = event.target.value;
   resetPaging();
+  syncControls();
   loadItems();
 });
 
@@ -630,12 +663,33 @@ els.theme.addEventListener("change", (event) => {
 
 els.rangeButtons.forEach((button) => {
   button.addEventListener("click", () => {
-    els.rangeButtons.forEach((item) => item.classList.remove("active"));
-    button.classList.add("active");
     state.hours = button.dataset.hours || "";
     resetPaging();
+    syncControls();
     loadItems();
   });
+});
+
+els.quickChannels.forEach((button) => {
+  button.addEventListener("click", () => {
+    state.channel = button.dataset.channel || "";
+    resetPaging();
+    syncControls();
+    loadItems();
+  });
+});
+
+els.clearFilters.addEventListener("click", () => {
+  state.q = "";
+  state.category = "";
+  state.channel = "";
+  state.tier = "";
+  state.sort = "score";
+  state.featured = false;
+  state.hours = "168";
+  resetPaging();
+  syncControls();
+  loadItems();
 });
 
 els.refresh.addEventListener("click", refresh);
