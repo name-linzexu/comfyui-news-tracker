@@ -516,6 +516,36 @@ sources:
                 {"bilibili_search"},
             )
 
+    def test_daily_archive_and_dates_can_filter_by_channel(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.sqlite3")
+            storage.upsert_items(
+                [
+                    make_item(
+                        "archive-rss",
+                        "RSS archive item",
+                        source_type="rss",
+                        score=99,
+                        published_at=datetime(2026, 6, 2, 12, 0, tzinfo=UTC),
+                    ),
+                    make_item(
+                        "archive-bili",
+                        "Bilibili archive item",
+                        source_type="bilibili_search",
+                        score=70,
+                        published_at=datetime(2026, 6, 1, 12, 0, tzinfo=UTC),
+                    ),
+                ]
+            )
+
+            archive = storage.daily_archive(limit=10, channel="bilibili")
+            dates = storage.available_digest_dates(limit=10, channel="bilibili")
+
+            self.assertEqual(dates, ["2026-06-01"])
+            self.assertEqual([day["date"] for day in archive], ["2026-06-01"])
+            self.assertEqual(archive[0]["total"], 1)
+            self.assertEqual(archive[0]["top_item"]["guid"], "archive-bili")
+
     def test_markdown_digest_and_webhook_payload(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             storage = Storage(Path(tmp) / "test.sqlite3")
@@ -843,6 +873,48 @@ class ApiSmokeTests(unittest.TestCase):
         self.assertEqual(latest.json()["date"], "2026-06-01")
         self.assertEqual(by_date.json()["total"], 1)
         self.assertEqual(dates.json()["dates"], ["2026-06-01"])
+
+    def test_daily_channel_endpoints_do_not_mix_sources(self) -> None:
+        main_module.storage.upsert_items(
+            [
+                make_item(
+                    "daily-channel-rss",
+                    "RSS daily channel item",
+                    source_type="rss",
+                    score=100,
+                    tags=["official", "model"],
+                ),
+                make_item(
+                    "daily-channel-bili",
+                    "Bilibili daily channel item",
+                    source_type="bilibili_search",
+                    score=70,
+                    tags=["community", "model"],
+                ),
+            ]
+        )
+        client = TestClient(app)
+
+        digest = client.get("/api/digest?day=2026-06-01&channel=bilibili&limit=10")
+        archive = client.get("/api/daily/archive?channel=bilibili&limit=10")
+        public_daily = client.get("/api/public/daily?day=2026-06-01&channel=bilibili&take=10")
+        markdown = client.get("/api/export/markdown?day=2026-06-01&channel=bilibili")
+        rss = client.get("/daily.xml?day=2026-06-01&channel=bilibili&limit=10")
+
+        self.assertEqual(digest.status_code, 200)
+        self.assertEqual(archive.status_code, 200)
+        self.assertEqual(public_daily.status_code, 200)
+        self.assertEqual(markdown.status_code, 200)
+        self.assertEqual(rss.status_code, 200)
+        self.assertEqual(digest.json()["total"], 1)
+        self.assertEqual({item["source_type"] for item in digest.json()["items"]}, {"bilibili_search"})
+        self.assertEqual(archive.json()["channel"], "bilibili")
+        self.assertEqual(archive.json()["days"][0]["total"], 1)
+        self.assertEqual(public_daily.json()["channel"], "bilibili")
+        self.assertIn("Bilibili daily channel item", markdown.text)
+        self.assertNotIn("RSS daily channel item", markdown.text)
+        self.assertIn("Bilibili daily channel item", rss.text)
+        self.assertNotIn("RSS daily channel item", rss.text)
 
     def test_public_daily_archive_endpoint(self) -> None:
         main_module.storage.upsert_items([make_item("archive-a", "Archive A", score=90, featured=True)])

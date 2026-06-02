@@ -48,8 +48,10 @@ def render_digest_rss(
     site_url: str,
     title: str = "ComfyUI Daily Digest Archive",
     description: str = "Daily ComfyUI digest issues with top signal summaries.",
+    channel: str | None = None,
 ) -> str:
     base_url = site_url.rstrip("/")
+    query = f"?channel={channel}" if channel else ""
     rows = []
     for day in days:
         date = day["date"]
@@ -69,8 +71,8 @@ def render_digest_rss(
             f"""
             <item>
               <title>ComfyUI Daily Digest {escape(date)}</title>
-              <link>{escape(f"{base_url}/daily/{date}")}</link>
-              <guid isPermaLink="false">comfyui-daily-{escape(date)}</guid>
+              <link>{escape(f"{base_url}/daily/{date}{query}")}</link>
+              <guid isPermaLink="false">comfyui-daily-{escape(date)}{escape(f'-{channel}' if channel else '')}</guid>
               <pubDate>{format_datetime(latest)}</pubDate>
               <category>daily</category>
               <description>{escape(" / ".join(summary_parts))}</description>

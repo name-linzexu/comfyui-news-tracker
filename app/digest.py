@@ -5,9 +5,16 @@ from typing import Any
 from .storage import Storage
 
 
-def render_markdown_digest(storage: Storage, *, day: str | None = None, limit: int = 50) -> str:
-    data = storage.daily_digest(day=day, limit=limit)
-    lines = [f"# ComfyUI Daily Digest - {data['date']}", ""]
+def render_markdown_digest(
+    storage: Storage,
+    *,
+    day: str | None = None,
+    limit: int = 50,
+    channel: str | None = None,
+) -> str:
+    data = storage.daily_digest(day=day, limit=limit, channel=channel)
+    channel_label = f" ({channel})" if channel else ""
+    lines = [f"# ComfyUI Daily Digest - {data['date']}{channel_label}", ""]
     lines.append(f"Total: {data['total']}")
     lines.append("")
     section_map = [

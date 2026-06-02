@@ -689,9 +689,17 @@ class Storage:
             "items": items,
         }
 
-    def daily_archive(self, *, limit: int = 30) -> list[dict[str, Any]]:
+    def daily_archive(self, *, limit: int = 30, channel: str | None = None) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        self._append_channel_clause(clauses, params, channel)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+
         with self.connection() as conn:
-            rows = conn.execute("SELECT * FROM items ORDER BY published_at DESC").fetchall()
+            rows = conn.execute(
+                f"SELECT i.* FROM items i {where} ORDER BY i.published_at DESC",
+                params,
+            ).fetchall()
 
         archive_by_day: dict[str, dict[str, Any]] = {}
         for row in rows:
@@ -742,14 +750,21 @@ class Storage:
             )
         return archive
 
-    def available_digest_dates(self, *, limit: int = 30) -> list[str]:
+    def available_digest_dates(self, *, limit: int = 30, channel: str | None = None) -> list[str]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        self._append_channel_clause(clauses, params, channel)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+
         with self.connection() as conn:
             rows = conn.execute(
-                """
-                SELECT published_at
-                FROM items
-                ORDER BY published_at DESC
-                """
+                f"""
+                SELECT i.published_at
+                FROM items i
+                {where}
+                ORDER BY i.published_at DESC
+                """,
+                params,
             ).fetchall()
         dates = []
         seen: set[str] = set()

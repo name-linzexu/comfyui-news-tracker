@@ -110,16 +110,18 @@ def feed(
     day: str | None = None,
     q: str | None = None,
     category: str | None = None,
+    channel: str | None = Query(None, pattern=CHANNEL_PATTERN),
     tier: str | None = None,
     hours: Annotated[int | None, Query(ge=1, le=24 * 90)] = None,
 ) -> dict[str, object]:
     if mode == "daily":
-        data = storage.daily_digest(day=day, limit=limit)
+        data = storage.daily_digest(day=day, limit=limit, channel=channel)
         return {"mode": mode, **data}
     rows = storage.list_items(
         limit=limit,
         query=q,
         category=category,
+        channel=channel,
         tier=tier,
         featured=True if mode == "selected" else None,
         since=relative_since(hours=hours or (DEFAULT_NEWS_HOURS if mode == "selected" else None)),
@@ -164,20 +166,29 @@ def digest(
 
 
 @app.get("/api/daily/latest")
-def latest_digest(limit: Annotated[int, Query(ge=1, le=100)] = 30) -> dict[str, object]:
-    dates = storage.available_digest_dates(limit=1)
+def latest_digest(
+    limit: Annotated[int, Query(ge=1, le=100)] = 30,
+    channel: str | None = Query(None, pattern=CHANNEL_PATTERN),
+) -> dict[str, object]:
+    dates = storage.available_digest_dates(limit=1, channel=channel)
     day = dates[0] if dates else None
-    return storage.daily_digest(day=day, limit=limit)
+    return storage.daily_digest(day=day, limit=limit, channel=channel)
 
 
 @app.get("/api/daily/dates")
-def digest_dates(limit: Annotated[int, Query(ge=1, le=365)] = 30) -> dict[str, object]:
-    return {"dates": storage.available_digest_dates(limit=limit)}
+def digest_dates(
+    limit: Annotated[int, Query(ge=1, le=365)] = 30,
+    channel: str | None = Query(None, pattern=CHANNEL_PATTERN),
+) -> dict[str, object]:
+    return {"dates": storage.available_digest_dates(limit=limit, channel=channel), "channel": channel}
 
 
 @app.get("/api/daily/archive")
-def daily_archive(limit: Annotated[int, Query(ge=1, le=365)] = 30) -> dict[str, object]:
-    return {"days": storage.daily_archive(limit=limit), "limit": limit}
+def daily_archive(
+    limit: Annotated[int, Query(ge=1, le=365)] = 30,
+    channel: str | None = Query(None, pattern=CHANNEL_PATTERN),
+) -> dict[str, object]:
+    return {"days": storage.daily_archive(limit=limit, channel=channel), "limit": limit, "channel": channel}
 
 
 @app.get("/api/stats")
@@ -435,10 +446,11 @@ def public_daily(
     take: Annotated[int | None, Query(ge=1, le=100)] = None,
     limit: Annotated[int | None, Query(ge=1, le=100)] = None,
     day: str | None = None,
+    channel: str | None = Query(None, pattern=CHANNEL_PATTERN),
 ) -> dict[str, object]:
     effective_limit = take or limit or 30
-    digest_day = day or latest_digest_day()
-    data = storage.daily_digest(day=digest_day, limit=effective_limit)
+    digest_day = day or latest_digest_day(channel=channel)
+    data = storage.daily_digest(day=digest_day, limit=effective_limit, channel=channel)
     data["take"] = effective_limit
     return data
 
@@ -447,23 +459,33 @@ def public_daily(
 def public_dailies(
     take: Annotated[int | None, Query(ge=1, le=365)] = None,
     limit: Annotated[int | None, Query(ge=1, le=365)] = None,
+    channel: str | None = Query(None, pattern=CHANNEL_PATTERN),
 ) -> dict[str, object]:
     effective_limit = take or limit or 30
-    return {"dates": storage.available_digest_dates(limit=effective_limit), "take": effective_limit}
+    return {
+        "dates": storage.available_digest_dates(limit=effective_limit, channel=channel),
+        "take": effective_limit,
+        "channel": channel,
+    }
 
 
 @app.get("/api/public/daily/archive")
 def public_daily_archive(
     take: Annotated[int | None, Query(ge=1, le=365)] = None,
     limit: Annotated[int | None, Query(ge=1, le=365)] = None,
+    channel: str | None = Query(None, pattern=CHANNEL_PATTERN),
 ) -> dict[str, object]:
     effective_limit = take or limit or 30
-    return {"days": storage.daily_archive(limit=effective_limit), "take": effective_limit}
+    return {"days": storage.daily_archive(limit=effective_limit, channel=channel), "take": effective_limit, "channel": channel}
 
 
 @app.get("/api/public/daily/{day}")
-def public_daily_by_date(day: str, take: Annotated[int, Query(ge=1, le=100)] = 30) -> dict[str, object]:
-    data = storage.daily_digest(day=day, limit=take)
+def public_daily_by_date(
+    day: str,
+    take: Annotated[int, Query(ge=1, le=100)] = 30,
+    channel: str | None = Query(None, pattern=CHANNEL_PATTERN),
+) -> dict[str, object]:
+    data = storage.daily_digest(day=day, limit=take, channel=channel)
     data["take"] = take
     return data
 
@@ -559,21 +581,37 @@ def rss_all(request: Request, limit: Annotated[int, Query(ge=1, le=200)] = 100) 
 
 
 @app.get("/rss/daily.xml", response_class=PlainTextResponse)
-def rss_daily(request: Request, limit: Annotated[int, Query(ge=1, le=100)] = 30) -> Response:
-    data = storage.daily_digest(limit=limit)
+def rss_daily(
+    request: Request,
+    limit: Annotated[int, Query(ge=1, le=100)] = 30,
+    day: str | None = None,
+    channel: str | None = Query(None, pattern=CHANNEL_PATTERN),
+) -> Response:
+    data = storage.daily_digest(day=day, limit=limit, channel=channel)
+    channel_label = f" {channel}" if channel else ""
     xml = render_rss(
         data["items"],
         site_url=str(request.base_url),
-        title=f"ComfyUI Daily Digest {data['date']}",
+        title=f"ComfyUI Daily Digest {data['date']}{channel_label}",
         description="Daily ComfyUI digest grouped from official, ecosystem, model, workflow and community signals.",
     )
     return Response(content=xml, media_type="application/rss+xml; charset=utf-8")
 
 
 @app.get("/rss/digests.xml", response_class=PlainTextResponse)
-def rss_digest_archive(request: Request, limit: Annotated[int, Query(ge=1, le=100)] = 30) -> Response:
-    days = storage.daily_archive(limit=limit)
-    xml = render_digest_rss(days, site_url=str(request.base_url))
+def rss_digest_archive(
+    request: Request,
+    limit: Annotated[int, Query(ge=1, le=100)] = 30,
+    channel: str | None = Query(None, pattern=CHANNEL_PATTERN),
+) -> Response:
+    days = storage.daily_archive(limit=limit, channel=channel)
+    channel_label = f" {channel}" if channel else ""
+    xml = render_digest_rss(
+        days,
+        site_url=str(request.base_url),
+        title=f"ComfyUI Daily Digest Archive{channel_label}",
+        channel=channel,
+    )
     return Response(content=xml, media_type="application/rss+xml; charset=utf-8")
 
 
@@ -588,13 +626,22 @@ def rss_all_short(request: Request, limit: Annotated[int, Query(ge=1, le=200)] =
 
 
 @app.get("/daily.xml", response_class=PlainTextResponse)
-def rss_daily_short(request: Request, limit: Annotated[int, Query(ge=1, le=100)] = 30) -> Response:
-    return rss_daily(request, limit=limit)
+def rss_daily_short(
+    request: Request,
+    limit: Annotated[int, Query(ge=1, le=100)] = 30,
+    day: str | None = None,
+    channel: str | None = Query(None, pattern=CHANNEL_PATTERN),
+) -> Response:
+    return rss_daily(request, limit=limit, day=day, channel=channel)
 
 
 @app.get("/digests.xml", response_class=PlainTextResponse)
-def rss_digest_archive_short(request: Request, limit: Annotated[int, Query(ge=1, le=100)] = 30) -> Response:
-    return rss_digest_archive(request, limit=limit)
+def rss_digest_archive_short(
+    request: Request,
+    limit: Annotated[int, Query(ge=1, le=100)] = 30,
+    channel: str | None = Query(None, pattern=CHANNEL_PATTERN),
+) -> Response:
+    return rss_digest_archive(request, limit=limit, channel=channel)
 
 
 @app.get("/rss/feeds.opml", response_class=PlainTextResponse)
@@ -609,8 +656,11 @@ def opml_feeds_short(request: Request) -> Response:
 
 
 @app.get("/api/export/markdown", response_class=PlainTextResponse)
-def export_markdown(day: str | None = None) -> str:
-    return render_markdown_digest(storage, day=day, limit=50)
+def export_markdown(
+    day: str | None = None,
+    channel: str | None = Query(None, pattern=CHANNEL_PATTERN),
+) -> str:
+    return render_markdown_digest(storage, day=day, limit=50, channel=channel)
 
 
 @app.get("/skill/comfyui-news/SKILL.md", include_in_schema=False)
@@ -733,8 +783,8 @@ def source_matches_channel(source: Any, channel: str) -> bool:
     return True
 
 
-def latest_digest_day() -> str | None:
-    dates = storage.available_digest_dates(limit=1)
+def latest_digest_day(channel: str | None = None) -> str | None:
+    dates = storage.available_digest_dates(limit=1, channel=channel)
     return dates[0] if dates else None
 
 

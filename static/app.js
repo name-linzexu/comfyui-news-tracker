@@ -33,6 +33,8 @@ const els = {
   dailyDate: document.querySelector("#dailyDateSelect"),
   dailyMarkdown: document.querySelector("#dailyMarkdownLink"),
   dailyRss: document.querySelector("#dailyRssLink"),
+  dailyDigestRss: document.querySelector("#dailyDigestRssLink"),
+  dailyNav: document.querySelector("#dailyNavLink"),
   stats: document.querySelector("#stats"),
   runStatus: document.querySelector("#runStatus"),
   meta: document.querySelector("#feedMeta"),
@@ -98,6 +100,29 @@ function sourceWallUrl() {
   return query ? `/api/source-wall?${query}` : "/api/source-wall";
 }
 
+function appendParams(path, entries) {
+  const params = new URLSearchParams();
+  for (const [key, value] of entries) {
+    if (value !== undefined && value !== null && value !== "") params.set(key, value);
+  }
+  const query = params.toString();
+  return query ? `${path}?${query}` : path;
+}
+
+function dailyPath(day = state.dailyDate) {
+  return day ? `/daily/${encodeURIComponent(day)}` : "/daily";
+}
+
+function dailyUrl(day = state.dailyDate) {
+  return appendParams(dailyPath(day), [["channel", state.channel]]);
+}
+
+function apiDailyParams(limit) {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (state.channel) params.set("channel", state.channel);
+  return params;
+}
+
 async function loadItems() {
   state.mode = "signals";
   setModeView();
@@ -132,21 +157,30 @@ async function loadStats() {
 }
 
 async function loadDaily() {
+  state.mode = "daily";
+  setModeView();
   els.meta.textContent = "Loading daily digest";
-  const digestParams = new URLSearchParams({ limit: "80" });
+  const digestParams = apiDailyParams(80);
   if (state.dailyDate) digestParams.set("day", state.dailyDate);
-  if (state.channel) digestParams.set("channel", state.channel);
+  const datesParams = apiDailyParams(60);
+  const archiveParams = apiDailyParams(14);
   const [datesRes, digestRes, wallRes] = await Promise.all([
-    fetch("/api/daily/dates?limit=60"),
+    fetch(`/api/daily/dates?${datesParams}`),
     fetch(`/api/digest?${digestParams}`),
     fetch(sourceWallUrl()),
   ]);
   const datesData = await datesRes.json();
-  const digestData = await digestRes.json();
+  let digestData = await digestRes.json();
   const wallData = await wallRes.json();
   state.digestDates = datesData.dates || [];
+  if (state.channel && state.dailyDate && !state.digestDates.includes(state.dailyDate) && state.digestDates.length) {
+    state.dailyDate = state.digestDates[0];
+    const fallbackParams = apiDailyParams(80);
+    fallbackParams.set("day", state.dailyDate);
+    digestData = await fetch(`/api/digest?${fallbackParams}`).then((res) => res.json());
+  }
   state.dailyDate = digestData.date || state.dailyDate;
-  const archiveData = await fetch("/api/daily/archive?limit=14").then((res) => res.json());
+  const archiveData = await fetch(`/api/daily/archive?${archiveParams}`).then((res) => res.json());
   renderSourceWall(wallData);
   renderDailyDates();
   renderDailyArchive(archiveData.days || []);
@@ -255,7 +289,7 @@ function setModeView() {
   els.clusters.hidden = isDaily;
   document.querySelector(".pagination").hidden = isDaily;
   document.querySelector(".segmented").hidden = isDaily;
-  document.querySelector(".quick-channels").hidden = isDaily;
+  document.querySelector(".quick-channels").hidden = false;
 }
 
 function renderDailyDates() {
@@ -281,12 +315,21 @@ function renderDailyDigest(data) {
     ["models", "Models"],
     ["community", "Community"],
   ];
-  els.meta.textContent = `${data.date} daily digest / ${data.total} signals`;
-  els.dailyMarkdown.href = `/api/export/markdown?day=${encodeURIComponent(data.date)}`;
-  els.dailyRss.href = "/rss/daily.xml";
+  const channelLabel = state.channel ? ` / ${readableChannel(state.channel)}` : "";
+  els.meta.textContent = `${data.date}${channelLabel} daily digest / ${data.total} signals`;
+  els.dailyMarkdown.href = appendParams("/api/export/markdown", [
+    ["day", data.date],
+    ["channel", state.channel],
+  ]);
+  els.dailyRss.href = appendParams("/rss/daily.xml", [
+    ["day", data.date],
+    ["channel", state.channel],
+  ]);
+  els.dailyDigestRss.href = appendParams("/digests.xml", [["channel", state.channel]]);
+  els.dailyNav.href = dailyUrl();
   els.dailySections.innerHTML = `
     <article class="daily-summary">
-      <h3>${escapeHtml(data.date)} ComfyUI Daily Digest</h3>
+      <h3>${escapeHtml(data.date)}${escapeHtml(channelLabel)} ComfyUI Daily Digest</h3>
       <p>${escapeHtml(digestCategorySummary(data.categories || {}))}</p>
     </article>
   `;
@@ -320,7 +363,10 @@ function renderDailyArchive(days) {
   els.dailyArchive.innerHTML = `
     <div class="daily-archive-head">
       <h3>Recent digests</h3>
-      <a href="/api/public/daily/archive?take=30">JSON</a>
+      <a href="${escapeAttr(appendParams("/api/public/daily/archive", [
+        ["take", "30"],
+        ["channel", state.channel],
+      ]))}">JSON</a>
     </div>
     <div class="daily-archive-list">
       ${days
@@ -328,7 +374,7 @@ function renderDailyArchive(days) {
           const active = day.date === state.dailyDate ? "active" : "";
           const topTitle = day.top_item?.title || "No top item";
           return `
-            <a class="archive-day ${active}" href="/daily/${encodeURIComponent(day.date)}">
+            <a class="archive-day ${active}" href="${escapeAttr(dailyUrl(day.date))}">
               <span>${escapeHtml(day.date)}</span>
               <b>${day.total}</b>
               <small>${day.featured} featured / top ${day.top_score}</small>
@@ -384,7 +430,11 @@ function renderItem(item) {
   node.querySelector("a").addEventListener("click", () => markRead(item.guid));
   node.querySelector(".mark-read").addEventListener("click", () => {
     toggleRead(item.guid);
-    loadItems();
+    if (state.mode === "daily") {
+      loadDaily();
+    } else {
+      loadItems();
+    }
   });
   return node;
 }
@@ -464,6 +514,7 @@ function syncControls() {
   els.quickChannels.forEach((button) => {
     button.classList.toggle("active", (button.dataset.channel || "") === state.channel);
   });
+  els.dailyNav.href = dailyUrl();
 }
 
 function readUrlState() {
@@ -487,8 +538,7 @@ function readUrlState() {
 function syncUrl() {
   const params = new URLSearchParams();
   if (state.mode === "daily") {
-    const nextPath = state.dailyDate ? `/daily/${encodeURIComponent(state.dailyDate)}` : "/daily";
-    window.history.replaceState(null, "", nextPath);
+    window.history.replaceState(null, "", dailyUrl());
     return;
   }
   if (state.q) params.set("q", state.q);
@@ -582,6 +632,23 @@ function readableSourceType(sourceType) {
   return labels[sourceType] || sourceType || "Source";
 }
 
+function readableChannel(channel) {
+  const labels = {
+    official: "Official",
+    github: "GitHub",
+    rss: "RSS",
+    community: "Community",
+    releases: "Releases",
+    x: "X",
+    bilibili: "Bilibili",
+    youtube: "YouTube",
+    models: "HF / Civitai",
+    discord: "Discord",
+    forum: "Forum",
+  };
+  return labels[channel] || channel || "All channels";
+}
+
 async function refresh() {
   els.refresh.disabled = true;
   els.refresh.textContent = "Refreshing";
@@ -648,7 +715,11 @@ els.channel.addEventListener("change", (event) => {
   state.channel = event.target.value;
   resetPaging();
   syncControls();
-  loadItems();
+  if (state.mode === "daily") {
+    loadDaily();
+  } else {
+    loadItems();
+  }
 });
 
 els.tier.addEventListener("change", (event) => {
@@ -688,7 +759,11 @@ els.quickChannels.forEach((button) => {
     state.channel = button.dataset.channel || "";
     resetPaging();
     syncControls();
-    loadItems();
+    if (state.mode === "daily") {
+      loadDaily();
+    } else {
+      loadItems();
+    }
   });
 });
 
@@ -702,7 +777,11 @@ els.clearFilters.addEventListener("click", () => {
   state.hours = "168";
   resetPaging();
   syncControls();
-  loadItems();
+  if (state.mode === "daily") {
+    loadDaily();
+  } else {
+    loadItems();
+  }
 });
 
 els.refresh.addEventListener("click", refresh);
@@ -716,8 +795,7 @@ els.dailyArchive.addEventListener("click", (event) => {
   const link = event.target.closest("a.archive-day");
   if (!link) return;
   event.preventDefault();
-  const parts = link.getAttribute("href").split("/");
-  state.dailyDate = decodeURIComponent(parts[parts.length - 1] || "");
+  state.dailyDate = decodeURIComponent(link.pathname.split("/").filter(Boolean).pop() || "");
   loadDaily();
 });
 

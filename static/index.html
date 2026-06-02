@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ComfyUI News Tracker</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260602-view" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260602-daily-channel" />
   </head>
   <body>
     <header class="topbar">
@@ -22,7 +22,7 @@
           <option value="dark">Dark</option>
         </select>
         <a class="icon-link" href="/" title="Signals">All</a>
-        <a class="icon-link" href="/daily" title="Daily digest">Daily</a>
+        <a id="dailyNavLink" class="icon-link" href="/daily" title="Daily digest">Daily</a>
         <a class="icon-link" href="/rss.xml" title="RSS">RSS</a>
         <a class="icon-link" href="/api/export/markdown" title="Markdown">MD</a>
         <button id="refreshBtn" type="button">Refresh</button>
@@ -175,7 +175,7 @@
             </label>
             <a id="dailyMarkdownLink" class="icon-link" href="/api/export/markdown">Markdown</a>
             <a id="dailyRssLink" class="icon-link" href="/rss/daily.xml">RSS</a>
-            <a class="icon-link" href="/digests.xml">Digest RSS</a>
+            <a id="dailyDigestRssLink" class="icon-link" href="/digests.xml">Digest RSS</a>
             <a class="icon-link" href="/feeds.opml">OPML</a>
           </div>
           <div id="dailyArchive" class="daily-archive"></div>
@@ -191,6 +191,6 @@
       </section>
     </main>
 
-    <script src="/static/app.js?v=20260602-view"></script>
+    <script src="/static/app.js?v=20260602-daily-channel"></script>
   </body>
 </html>
