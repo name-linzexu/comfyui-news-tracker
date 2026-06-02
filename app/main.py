@@ -155,8 +155,12 @@ def clusters(
 
 
 @app.get("/api/digest")
-def digest(day: str | None = None, limit: Annotated[int, Query(ge=1, le=100)] = 30) -> dict[str, object]:
-    return storage.daily_digest(day=day, limit=limit)
+def digest(
+    day: str | None = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 30,
+    channel: str | None = Query(None, pattern=CHANNEL_PATTERN),
+) -> dict[str, object]:
+    return storage.daily_digest(day=day, limit=limit, channel=channel)
 
 
 @app.get("/api/daily/latest")

@@ -99,6 +99,8 @@ function sourceWallUrl() {
 }
 
 async function loadItems() {
+  state.mode = "signals";
+  setModeView();
   els.meta.textContent = "Loading";
   const [itemsRes, clustersRes, wallRes] = await Promise.all([
     fetch(`/api/items?${buildParams()}`),
@@ -131,9 +133,12 @@ async function loadStats() {
 
 async function loadDaily() {
   els.meta.textContent = "Loading daily digest";
+  const digestParams = new URLSearchParams({ limit: "80" });
+  if (state.dailyDate) digestParams.set("day", state.dailyDate);
+  if (state.channel) digestParams.set("channel", state.channel);
   const [datesRes, digestRes, wallRes] = await Promise.all([
     fetch("/api/daily/dates?limit=60"),
-    fetch(`/api/digest?limit=80${state.dailyDate ? `&day=${encodeURIComponent(state.dailyDate)}` : ""}`),
+    fetch(`/api/digest?${digestParams}`),
     fetch(sourceWallUrl()),
   ]);
   const datesData = await datesRes.json();
@@ -495,7 +500,7 @@ function syncUrl() {
   if (state.hours) params.set("hours", state.hours);
   if (state.page > 1) params.set("page", String(state.page));
   const query = params.toString();
-  const nextUrl = query ? `${window.location.pathname}?${query}` : window.location.pathname;
+  const nextUrl = query ? `/?${query}` : "/";
   window.history.replaceState(null, "", nextUrl);
 }
 
@@ -582,7 +587,7 @@ async function refresh() {
   els.refresh.textContent = "Refreshing";
   try {
     await fetch("/api/refresh?wait=true", { method: "POST" });
-    await Promise.all([loadItems(), loadStats()]);
+    await Promise.all([state.mode === "daily" ? loadDaily() : loadItems(), loadStats()]);
   } finally {
     els.refresh.disabled = false;
     els.refresh.textContent = "Refresh";

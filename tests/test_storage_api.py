@@ -54,6 +54,7 @@ def make_item(
     published_at: datetime | None = None,
     source_type: str = "rss",
     category: str = "official",
+    tags: list[str] | None = None,
 ) -> NewsItem:
     now = published_at or datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
     return NewsItem(
@@ -69,7 +70,7 @@ def make_item(
         fetched_at=now,
         score=score,
         featured=featured,
-        tags=["official", "workflow"],
+        tags=tags or ["official", "workflow"],
         source_tier="T1",
         reason="primary source",
         score_breakdown={"source": score},
@@ -482,6 +483,38 @@ sources:
             self.assertEqual([item["title"] for item in digest["items"]], ["Beijing June 2"])
             self.assertEqual(dates, ["2026-06-03", "2026-06-02"])
             self.assertEqual([day["date"] for day in archive], ["2026-06-03", "2026-06-02"])
+
+    def test_daily_digest_can_filter_by_channel(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.sqlite3")
+            storage.upsert_items(
+                [
+                    make_item(
+                        "digest-rss",
+                        "RSS video model",
+                        source_type="rss",
+                        category="official",
+                        tags=["official", "model", "video"],
+                    ),
+                    make_item(
+                        "digest-bili",
+                        "Bilibili video model",
+                        source_type="bilibili_search",
+                        category="community",
+                        tags=["community", "model", "video"],
+                    ),
+                ]
+            )
+
+            digest = storage.daily_digest(day="2026-06-01", channel="bilibili", limit=10)
+
+            self.assertEqual(digest["channel"], "bilibili")
+            self.assertEqual(digest["total"], 1)
+            self.assertEqual([item["guid"] for item in digest["items"]], ["digest-bili"])
+            self.assertEqual(
+                {item["source_type"] for item in digest["sections"]["video_image_models"]},
+                {"bilibili_search"},
+            )
 
     def test_markdown_digest_and_webhook_payload(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

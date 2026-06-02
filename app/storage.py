@@ -649,35 +649,40 @@ class Storage:
                 result.append(data)
         return result
 
-    def daily_digest(self, *, day: str | None = None, limit: int = 30) -> dict[str, Any]:
+    def daily_digest(self, *, day: str | None = None, limit: int = 30, channel: str | None = None) -> dict[str, Any]:
         digest_day, start, end = digest_day_bounds(day)
+        clauses = ["i.published_at >= ?", "i.published_at < ?"]
+        params: list[Any] = [start, end]
+        self._append_channel_clause(clauses, params, channel)
+        where = " AND ".join(clauses)
 
         with self.connection() as conn:
             rows = conn.execute(
-                """
-                SELECT *
-                FROM items
-                WHERE published_at >= ? AND published_at < ?
+                f"""
+                SELECT i.*
+                FROM items i
+                WHERE {where}
                 ORDER BY score DESC, published_at DESC
                 LIMIT ?
                 """,
-                (start, end, limit),
+                [*params, limit],
             ).fetchall()
             categories = conn.execute(
-                """
-                SELECT category, COUNT(*) AS count
-                FROM items
-                WHERE published_at >= ? AND published_at < ?
-                GROUP BY category
+                f"""
+                SELECT i.category, COUNT(*) AS count
+                FROM items i
+                WHERE {where}
+                GROUP BY i.category
                 ORDER BY count DESC
                 """,
-                (start, end),
+                params,
             ).fetchall()
 
         items = [self._row_to_dict(row) for row in rows]
         return {
             "date": digest_day,
             "timezone": digest_timezone_name(),
+            "channel": channel,
             "total": sum(row["count"] for row in categories),
             "categories": {row["category"]: row["count"] for row in categories},
             "sections": self._digest_sections(items),
