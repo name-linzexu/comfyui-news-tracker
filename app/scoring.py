@@ -602,6 +602,11 @@ def score_breakdown(
     if source_type == "github_search_repos" and total > 48:
         penalty -= total - 48
         total = 48
+    if source_type in {"github_commits", "rss"} and source_tier == "T1" and "bugfix" in tag_set:
+        commit_bugfix_cap = 84 if "performance" in tag_set else 72
+        if total > commit_bugfix_cap:
+            penalty -= total - commit_bugfix_cap
+            total = commit_bugfix_cap
     if is_social_source_type(source_type):
         if (
             (source_type == "x_search" and is_low_value_x_text(text))

@@ -1143,7 +1143,11 @@ def is_featured_item(
     has_performance_signal = "performance" in tag_set or any(word in text for word in performance_words)
     has_migration_signal = "breaking" in tag_set and any(word in text for word in migration_words)
     has_user_visible_update = any(word in text for word in update_words)
+    is_commit_feed = source.type in {"github_commits", "rss"} and "commit" in source.id
+    is_bugfix_only_commit = is_commit_feed and "bugfix" in tag_set and not has_performance_signal
     is_maintenance_churn = any(word in text for word in maintenance_words)
+    if is_bugfix_only_commit:
+        return False
     if is_maintenance_churn and not has_performance_signal and not any(
         word in text for word in ("add new", "added", "support", "compatible", "release", "v0.", "v1.", "v2.", "v3.")
     ):
@@ -1154,7 +1158,7 @@ def is_featured_item(
     if is_low_churn:
         return False
     if source.tier == "T1":
-        if source.type in {"github_commits", "rss"} and "commit" in source.id:
+        if is_commit_feed:
             return (
                 (score >= 92 and has_model_signal and has_user_visible_update)
                 or (score >= 92 and "custom-nodes" in tag_set and has_release_signal)

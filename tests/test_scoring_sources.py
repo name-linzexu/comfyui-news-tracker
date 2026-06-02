@@ -37,6 +37,18 @@ class ScoringTests(unittest.TestCase):
         self.assertLessEqual(score, 100)
         self.assertGreaterEqual(score, 0)
 
+    def test_commit_bugfix_does_not_score_like_release_news(self) -> None:
+        score = score_item(
+            title="[Partner Nodes] fix: respect VideoSlice trim when resizing videos (#14213)",
+            summary="Bugfix for VideoSlice trim when resizing videos.",
+            source_weight=5,
+            source_type="rss",
+            source_tier="T1",
+            tags=["official", "custom-nodes", "video", "bugfix"],
+        )
+
+        self.assertLessEqual(score, 72)
+
     def test_unsafe_terms_are_penalized_and_filtered(self) -> None:
         source = Source(
             id="github-comfyui-topics",
@@ -141,6 +153,15 @@ class ScoringTests(unittest.TestCase):
                 title="feat: add new nodes for Wan video model",
                 summary="Adds partner nodes for a new video model.",
                 tags=["official", "custom-nodes", "model", "video"],
+            )
+        )
+        self.assertFalse(
+            is_featured_item(
+                score=100,
+                source=commit_source,
+                title="[Partner Nodes] fix: respect VideoSlice trim when resizing videos (#14213)",
+                summary="Bugfix for VideoSlice trim when resizing videos.",
+                tags=["official", "custom-nodes", "video", "bugfix"],
             )
         )
         self.assertFalse(
