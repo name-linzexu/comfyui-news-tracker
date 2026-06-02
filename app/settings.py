@@ -55,7 +55,8 @@ class Settings:
     openai_api_key: str | None = env_secret("OPENAI_API_KEY", BASE_DIR / ".secrets" / "openai_api_key.txt")
     openai_base_url: str = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
     llm_model: str = os.getenv("COMFYUI_NEWS_LLM_MODEL", "gpt-4.1-mini")
-    webhook_url: str | None = os.getenv("COMFYUI_NEWS_WEBHOOK_URL")
+    digest_timezone: str = os.getenv("COMFYUI_NEWS_TIMEZONE", "Asia/Shanghai")
+    webhook_url: str | None = env_secret("COMFYUI_NEWS_WEBHOOK_URL", BASE_DIR / ".secrets" / "webhook_url.txt")
     webhook_timeout: float = float(os.getenv("COMFYUI_NEWS_WEBHOOK_TIMEOUT", "15"))
 
 

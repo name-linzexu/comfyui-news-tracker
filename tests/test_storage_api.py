@@ -42,7 +42,7 @@ from app.sources import (
     x_browser_query,
     x_interaction_count,
 )
-from app.storage import Storage, normalize_fts_query
+from app.storage import Storage, digest_day_for, normalize_fts_query
 
 
 def make_item(
@@ -450,6 +450,38 @@ sources:
             self.assertEqual(archive[0]["total"], 1)
             self.assertEqual(archive[0]["featured"], 1)
             self.assertEqual(archive[0]["top_item"]["title"], "Day A")
+
+    def test_daily_digest_uses_configured_local_timezone(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.sqlite3")
+            storage.upsert_items(
+                [
+                    make_item(
+                        "beijing-june-2",
+                        "Beijing June 2",
+                        score=90,
+                        featured=True,
+                        published_at=datetime(2026, 6, 1, 17, 24, tzinfo=UTC),
+                    ),
+                    make_item(
+                        "beijing-june-3",
+                        "Beijing June 3",
+                        score=80,
+                        published_at=datetime(2026, 6, 2, 16, 30, tzinfo=UTC),
+                    ),
+                ]
+            )
+
+            digest = storage.daily_digest(day="2026-06-02", limit=10)
+            archive = storage.daily_archive(limit=10)
+            dates = storage.available_digest_dates(limit=10)
+
+            self.assertEqual(digest_day_for("2026-06-01T17:24:00+00:00"), "2026-06-02")
+            self.assertEqual(digest["date"], "2026-06-02")
+            self.assertEqual(digest["timezone"], "Asia/Shanghai")
+            self.assertEqual([item["title"] for item in digest["items"]], ["Beijing June 2"])
+            self.assertEqual(dates, ["2026-06-03", "2026-06-02"])
+            self.assertEqual([day["date"] for day in archive], ["2026-06-03", "2026-06-02"])
 
     def test_markdown_digest_and_webhook_payload(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

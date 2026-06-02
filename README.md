@@ -329,12 +329,21 @@ Content-Type: application/json
 
 ## 定时刷新
 
-安装 Windows 计划任务，每 2 小时刷新一次：
+安装 Windows 计划任务，默认每天本地时间 09:00 执行一次 `collect.ps1 -Mode all`，也就是刷新数据库并导出当天日报：
 
 ```powershell
 cd comfyui-news-tracker
 .\scripts\install_scheduled_task.ps1
 ```
+
+自定义时间或改为每 2 小时刷新：
+
+```powershell
+.\scripts\install_scheduled_task.ps1 -Schedule Daily -At 09:00 -Mode all
+.\scripts\install_scheduled_task.ps1 -Schedule Hourly -EveryHours 2 -Mode refresh
+```
+
+日报按 `COMFYUI_NEWS_TIMEZONE` 分日，默认 `Asia/Shanghai`。外部推送仍需要先配置 `COMFYUI_NEWS_WEBHOOK_URL` 或 `.secrets\webhook_url.txt`。
 
 Web UI 的 Overview 会显示最近一次刷新是否完整成功，以及成功/失败信源数量。
 刷新状态会区分 `inserted`、`updated`、`unchanged`，便于判断这次刷新是真的新增内容，还是只是重复拉取。

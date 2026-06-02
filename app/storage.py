@@ -3,19 +3,22 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from collections import Counter
 from collections.abc import Iterable
 from contextlib import contextmanager
 from dataclasses import replace
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, time, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .models import NewsItem
 from .settings import settings
 
 
 FTS_TOKEN_PATTERN = re.compile(r"[\w]+", re.UNICODE)
+DEFAULT_DIGEST_TIMEZONE = "Asia/Shanghai"
 
 
 @dataclass(frozen=True)
@@ -41,6 +44,41 @@ def parse_dt(value: str | None) -> datetime | None:
         return datetime.fromisoformat(text)
     except ValueError:
         return None
+
+
+def digest_timezone_name() -> str:
+    return settings.digest_timezone.strip() or DEFAULT_DIGEST_TIMEZONE
+
+
+def digest_timezone() -> tzinfo:
+    name = digest_timezone_name()
+    try:
+        return ZoneInfo(name)
+    except ZoneInfoNotFoundError:
+        if name in {DEFAULT_DIGEST_TIMEZONE, "China", "PRC", "CST", "UTC+8", "UTC+08:00", "+08:00"}:
+            return timezone(timedelta(hours=8), DEFAULT_DIGEST_TIMEZONE)
+        return UTC
+
+
+def digest_day_for(value: str | datetime | None) -> str | None:
+    parsed = parse_dt(value) if isinstance(value, str) else value
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(digest_timezone()).date().isoformat()
+
+
+def digest_day_bounds(day: str | None = None) -> tuple[str, str, str]:
+    tz = digest_timezone()
+    local_day = date.fromisoformat(day) if day else utc_now().astimezone(tz).date()
+    start_local = datetime.combine(local_day, time.min, tzinfo=tz)
+    end_local = start_local + timedelta(days=1)
+    return (
+        local_day.isoformat(),
+        start_local.astimezone(UTC).isoformat(),
+        end_local.astimezone(UTC).isoformat(),
+    )
 
 
 def normalize_fts_query(value: str | None) -> str | None:
@@ -612,20 +650,14 @@ class Storage:
         return result
 
     def daily_digest(self, *, day: str | None = None, limit: int = 30) -> dict[str, Any]:
-        if day:
-            start = f"{day}T00:00:00+00:00"
-            end = f"{day}T23:59:59+00:00"
-        else:
-            today = utc_now().date().isoformat()
-            start = f"{today}T00:00:00+00:00"
-            end = f"{today}T23:59:59+00:00"
+        digest_day, start, end = digest_day_bounds(day)
 
         with self.connection() as conn:
             rows = conn.execute(
                 """
                 SELECT *
                 FROM items
-                WHERE published_at BETWEEN ? AND ?
+                WHERE published_at >= ? AND published_at < ?
                 ORDER BY score DESC, published_at DESC
                 LIMIT ?
                 """,
@@ -635,7 +667,7 @@ class Storage:
                 """
                 SELECT category, COUNT(*) AS count
                 FROM items
-                WHERE published_at BETWEEN ? AND ?
+                WHERE published_at >= ? AND published_at < ?
                 GROUP BY category
                 ORDER BY count DESC
                 """,
@@ -644,7 +676,8 @@ class Storage:
 
         items = [self._row_to_dict(row) for row in rows]
         return {
-            "date": start[:10],
+            "date": digest_day,
+            "timezone": digest_timezone_name(),
             "total": sum(row["count"] for row in categories),
             "categories": {row["category"]: row["count"] for row in categories},
             "sections": self._digest_sections(items),
@@ -653,69 +686,77 @@ class Storage:
 
     def daily_archive(self, *, limit: int = 30) -> list[dict[str, Any]]:
         with self.connection() as conn:
-            day_rows = conn.execute(
-                """
-                SELECT
-                    substr(published_at, 1, 10) AS day,
-                    COUNT(*) AS total,
-                    SUM(featured) AS featured,
-                    MAX(score) AS top_score,
-                    MAX(published_at) AS latest_published_at
-                FROM items
-                GROUP BY day
-                ORDER BY day DESC
-                LIMIT ?
-                """,
-                (limit,),
-            ).fetchall()
-            archive = []
-            for row in day_rows:
-                category_rows = conn.execute(
-                    """
-                    SELECT category, COUNT(*) AS count
-                    FROM items
-                    WHERE substr(published_at, 1, 10) = ?
-                    GROUP BY category
-                    ORDER BY count DESC
-                    """,
-                    (row["day"],),
-                ).fetchall()
-                top_item = conn.execute(
-                    """
-                    SELECT *
-                    FROM items
-                    WHERE substr(published_at, 1, 10) = ?
-                    ORDER BY score DESC, published_at DESC
-                    LIMIT 1
-                    """,
-                    (row["day"],),
-                ).fetchone()
-                archive.append(
-                    {
-                        "date": row["day"],
-                        "total": int(row["total"] or 0),
-                        "featured": int(row["featured"] or 0),
-                        "top_score": int(row["top_score"] or 0),
-                        "latest_published_at": row["latest_published_at"],
-                        "categories": {item["category"]: item["count"] for item in category_rows},
-                        "top_item": self._row_to_dict(top_item) if top_item else None,
-                    }
-                )
+            rows = conn.execute("SELECT * FROM items ORDER BY published_at DESC").fetchall()
+
+        archive_by_day: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            day = digest_day_for(row["published_at"])
+            if not day:
+                continue
+            if day not in archive_by_day:
+                if len(archive_by_day) >= limit:
+                    break
+                archive_by_day[day] = {
+                    "date": day,
+                    "total": 0,
+                    "featured": 0,
+                    "top_score": 0,
+                    "latest_published_at": row["published_at"],
+                    "categories": Counter(),
+                    "top_item": None,
+                }
+            entry = archive_by_day[day]
+            score = int(row["score"] or 0)
+            entry["total"] += 1
+            entry["featured"] += int(row["featured"] or 0)
+            entry["top_score"] = max(entry["top_score"], score)
+            if row["published_at"] > entry["latest_published_at"]:
+                entry["latest_published_at"] = row["published_at"]
+            entry["categories"][row["category"]] += 1
+            top_item = entry["top_item"]
+            if (
+                top_item is None
+                or score > int(top_item["score"] or 0)
+                or (score == int(top_item["score"] or 0) and row["published_at"] > top_item["published_at"])
+            ):
+                entry["top_item"] = row
+
+        archive = []
+        for entry in archive_by_day.values():
+            category_counts = dict(sorted(entry["categories"].items(), key=lambda item: (-item[1], item[0])))
+            archive.append(
+                {
+                    "date": entry["date"],
+                    "total": entry["total"],
+                    "featured": entry["featured"],
+                    "top_score": entry["top_score"],
+                    "latest_published_at": entry["latest_published_at"],
+                    "categories": category_counts,
+                    "top_item": self._row_to_dict(entry["top_item"]) if entry["top_item"] else None,
+                }
+            )
         return archive
 
     def available_digest_dates(self, *, limit: int = 30) -> list[str]:
         with self.connection() as conn:
             rows = conn.execute(
                 """
-                SELECT substr(published_at, 1, 10) AS day
+                SELECT published_at
                 FROM items
-                GROUP BY day
-                ORDER BY day DESC
-                LIMIT ?
-                """,
-                (limit,),
+                ORDER BY published_at DESC
+                """
             ).fetchall()
-        return [row["day"] for row in rows]
+        dates = []
+        seen: set[str] = set()
+        for row in rows:
+            day = digest_day_for(row["published_at"])
+            if not day or day in seen:
+                continue
+            seen.add(day)
+            dates.append(day)
+            if len(dates) >= limit:
+                break
+        return dates
 
     def stats(self) -> dict[str, Any]:
         with self.connection() as conn:

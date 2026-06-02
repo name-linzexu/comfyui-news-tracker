@@ -37,7 +37,7 @@ def main() -> None:
     parser.add_argument("--no-webhook", action="store_true", help="Do not send COMFYUI_NEWS_WEBHOOK_URL for this run.")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     parser.add_argument("--quiet", action="store_true", help="Only print the final summary line unless --json is used.")
-    parser.add_argument("--day", help="Digest UTC date in YYYY-MM-DD format. Defaults to latest digest day.")
+    parser.add_argument("--day", help="Digest date in YYYY-MM-DD format. Defaults to latest configured local digest day.")
     parser.add_argument("--out-dir", default=str(ROOT / "data" / "digests"), help="Digest output directory.")
     args = parser.parse_args()
 
