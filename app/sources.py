@@ -421,14 +421,21 @@ class Fetcher:
                 )
             response.raise_for_status()
             payload = response.json()
-            if payload.get("code") != 0 and wbi_key:
-                response = await self.client.get(
-                    "https://api.bilibili.com/x/web-interface/search/type",
-                    headers=term_headers,
-                    params={key: value for key, value in params.items() if key not in {"w_rid", "wts"}},
-                )
-                response.raise_for_status()
-                payload = response.json()
+            result_rows = (payload.get("data") or {}).get("result") or []
+            if (payload.get("code") != 0 and wbi_key) or (payload.get("code") == 0 and not result_rows):
+                try:
+                    response = await self.client.get(
+                        "https://api.bilibili.com/x/web-interface/search/type",
+                        headers=term_headers,
+                        params={key: value for key, value in params.items() if key not in {"w_rid", "wts"}},
+                    )
+                    response.raise_for_status()
+                    fallback_payload = response.json()
+                    if fallback_payload.get("code") == 0 or payload.get("code") != 0:
+                        payload = fallback_payload
+                except httpx.HTTPError:
+                    if payload.get("code") != 0:
+                        raise
             if payload.get("code") != 0:
                 raise SourceFetchError(f"bilibili search returned code {payload.get('code')}: {payload.get('message')}")
             for video in (payload.get("data") or {}).get("result", [])[:30]:
@@ -518,14 +525,21 @@ class Fetcher:
             )
             response.raise_for_status()
             payload = response.json()
-            if payload.get("code") != 0 and wbi_key:
-                response = await self.client.get(
-                    "https://api.bilibili.com/x/web-interface/search/type",
-                    headers=term_headers,
-                    params={key: value for key, value in params.items() if key not in {"w_rid", "wts"}},
-                )
-                response.raise_for_status()
-                payload = response.json()
+            result_rows = (payload.get("data") or {}).get("result") or []
+            if (payload.get("code") != 0 and wbi_key) or (payload.get("code") == 0 and not result_rows):
+                try:
+                    response = await self.client.get(
+                        "https://api.bilibili.com/x/web-interface/search/type",
+                        headers=term_headers,
+                        params={key: value for key, value in params.items() if key not in {"w_rid", "wts"}},
+                    )
+                    response.raise_for_status()
+                    fallback_payload = response.json()
+                    if fallback_payload.get("code") == 0 or payload.get("code") != 0:
+                        payload = fallback_payload
+                except httpx.HTTPError:
+                    if payload.get("code") != 0:
+                        raise
             if payload.get("code") != 0:
                 raise SourceFetchError(f"bilibili search returned code {payload.get('code')}: {payload.get('message')}")
             for video in (payload.get("data") or {}).get("result", [])[:30]:
@@ -1731,6 +1745,7 @@ def bilibili_search_terms(query: str) -> list[str]:
     terms = [re.sub(r"[()]+", " ", part).strip() for part in raw_parts if part.strip()]
     if not terms:
         terms = [query]
+    terms.insert(0, "ComfyUI")
     extras = [
         "ComfyUI 新模型",
         "ComfyUI 视频模型",

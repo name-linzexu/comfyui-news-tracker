@@ -365,6 +365,7 @@ sources:
 
     def test_bilibili_search_terms_expand_news_topics(self) -> None:
         terms = bilibili_search_terms("ComfyUI 新模型 视频模型 节点 Flux Wan Qwen")
+        self.assertEqual(terms[0], "ComfyUI")
         self.assertIn("ComfyUI 模型发布", terms)
         self.assertIn("ComfyUI 节点适配", terms)
         self.assertIn("ComfyUI 低显存", terms)
