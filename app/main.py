@@ -219,8 +219,14 @@ def sources() -> dict[str, object]:
 
 
 @app.get("/api/source-wall")
-def source_wall(include_pending: bool = True) -> dict[str, object]:
+def source_wall(
+    include_pending: bool = True,
+    channel: str | None = Query(None, pattern=CHANNEL_PATTERN),
+) -> dict[str, object]:
     configured, _ = load_sources()
+    configured = filter_sources_for_channel(configured, channel)
+    if channel:
+        include_pending = False
     return storage.source_wall(configured, include_pending=include_pending)
 
 
@@ -459,8 +465,14 @@ def public_daily_by_date(day: str, take: Annotated[int, Query(ge=1, le=100)] = 3
 
 
 @app.get("/api/public/sources")
-def public_sources(include_pending: bool = True) -> dict[str, object]:
+def public_sources(
+    include_pending: bool = True,
+    channel: str | None = Query(None, pattern=CHANNEL_PATTERN),
+) -> dict[str, object]:
     configured, _ = load_sources()
+    configured = filter_sources_for_channel(configured, channel)
+    if channel:
+        include_pending = False
     return storage.source_wall(configured, include_pending=include_pending)
 
 
@@ -682,6 +694,39 @@ def item_page(
 
 def relative_since(*, hours: int | None) -> datetime | None:
     return datetime.now(UTC) - timedelta(hours=hours) if hours else None
+
+
+def filter_sources_for_channel(sources: list[Any], channel: str | None) -> list[Any]:
+    if not channel:
+        return sources
+    return [source for source in sources if source_matches_channel(source, channel)]
+
+
+def source_matches_channel(source: Any, channel: str) -> bool:
+    source_type = source.type
+    if channel == "official":
+        return source.category == "official" or source.tier == "T1"
+    if channel == "github":
+        return source_type.startswith("github_")
+    if channel == "rss":
+        return source_type == "rss"
+    if channel == "community":
+        return source.category == "community"
+    if channel == "releases":
+        return source_type == "github_releases" or "release" in source.name.lower()
+    if channel == "x":
+        return source_type == "x_search"
+    if channel == "bilibili":
+        return source_type == "bilibili_search"
+    if channel == "youtube":
+        return source_type in {"youtube_search", "youtube_rss"}
+    if channel == "models":
+        return source_type in {"huggingface_models", "civitai_models"}
+    if channel == "discord":
+        return source_type == "discord_feed"
+    if channel == "forum":
+        return source_type in {"forum_json", "json_feed"}
+    return True
 
 
 def latest_digest_day() -> str | None:

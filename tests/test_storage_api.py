@@ -709,6 +709,19 @@ class ApiSmokeTests(unittest.TestCase):
         self.assertEqual(feedback.status_code, 200)
         self.assertEqual(invalid.status_code, 422)
 
+    def test_source_wall_filters_by_channel(self) -> None:
+        client = TestClient(app)
+        local_response = client.get("/api/source-wall?channel=bilibili")
+        public_response = client.get("/api/public/sources?channel=bilibili")
+
+        self.assertEqual(local_response.status_code, 200)
+        self.assertEqual(public_response.status_code, 200)
+        for data in (local_response.json(), public_response.json()):
+            self.assertGreaterEqual(data["configured"], 1)
+            self.assertEqual(data["pending_submissions"], 0)
+            self.assertTrue(data["sources"])
+            self.assertEqual({source["type"] for source in data["sources"]}, {"bilibili_search"})
+
     def test_items_endpoint_reports_pagination(self) -> None:
         main_module.storage.upsert_items(
             [

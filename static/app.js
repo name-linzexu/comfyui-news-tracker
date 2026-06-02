@@ -91,12 +91,19 @@ function buildParams() {
   return params;
 }
 
+function sourceWallUrl() {
+  const params = new URLSearchParams();
+  if (state.channel) params.set("channel", state.channel);
+  const query = params.toString();
+  return query ? `/api/source-wall?${query}` : "/api/source-wall";
+}
+
 async function loadItems() {
   els.meta.textContent = "Loading";
   const [itemsRes, clustersRes, wallRes] = await Promise.all([
     fetch(`/api/items?${buildParams()}`),
     fetch(`/api/clusters?${buildParams()}`),
-    fetch("/api/source-wall"),
+    fetch(sourceWallUrl()),
   ]);
   const data = await itemsRes.json();
   const clusterData = await clustersRes.json();
@@ -127,7 +134,7 @@ async function loadDaily() {
   const [datesRes, digestRes, wallRes] = await Promise.all([
     fetch("/api/daily/dates?limit=60"),
     fetch(`/api/digest?limit=80${state.dailyDate ? `&day=${encodeURIComponent(state.dailyDate)}` : ""}`),
-    fetch("/api/source-wall"),
+    fetch(sourceWallUrl()),
   ]);
   const datesData = await datesRes.json();
   const digestData = await digestRes.json();
@@ -498,13 +505,14 @@ function renderSourceWall(data) {
     els.sourceWall.innerHTML = "";
     return;
   }
+  const jsonHref = sourceWallUrl();
   els.sourceWall.innerHTML = `
     <div class="source-wall-head">
       <div>
         <h3>Source wall</h3>
         <p>${data.configured || 0} active, ${data.pending_submissions || 0} pending suggestions</p>
       </div>
-      <a href="/api/source-wall">JSON</a>
+      <a href="${escapeAttr(jsonHref)}">JSON</a>
     </div>
     <div class="source-wall-list">
       ${sources
