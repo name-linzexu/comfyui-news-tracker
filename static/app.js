@@ -401,6 +401,7 @@ function renderItem(item) {
   const date = item.published_at ? fmt.format(new Date(item.published_at)) : "";
   const reason = item.reason ? `<p class="reason">${escapeHtml(item.reason)}</p>` : "";
   const breakdown = renderBreakdown(item.score_breakdown || {});
+  const engagement = renderEngagement(item.engagement);
   const sourceType = readableSourceType(item.source_type);
   const scoreLabel = item.score >= 85 ? "High" : item.score >= 65 ? "Solid" : "Scan";
   node.innerHTML = `
@@ -418,6 +419,7 @@ function renderItem(item) {
     </div>
     ${reason}
     <p class="summary">${escapeHtml(item.summary || "No summary")}</p>
+    ${engagement}
     ${breakdown}
     <div class="meta">
       <span>${escapeHtml(item.source_name)}</span>
@@ -437,6 +439,34 @@ function renderItem(item) {
     }
   });
   return node;
+}
+
+function renderEngagement(engagement) {
+  if (!engagement || typeof engagement !== "object") return "";
+  const fields = [
+    ["views", "Views"],
+    ["likes", "Likes"],
+    ["coins", "Coins"],
+    ["favorites", "Favs"],
+    ["shares", "Shares"],
+    ["comments", "Comments"],
+    ["danmaku", "Danmaku"],
+  ];
+  const chips = fields
+    .map(([key, label]) => {
+      const value = Number(engagement[key] || 0);
+      if (!value) return "";
+      return `<span title="${escapeAttr(label)}">${escapeHtml(label)} ${escapeHtml(formatCount(value))}</span>`;
+    })
+    .filter(Boolean)
+    .join("");
+  return chips ? `<div class="engagement">${chips}</div>` : "";
+}
+
+function formatCount(value) {
+  if (value >= 1000000) return `${(value / 1000000).toFixed(value >= 10000000 ? 0 : 1)}M`;
+  if (value >= 1000) return `${(value / 1000).toFixed(value >= 10000 ? 0 : 1)}K`;
+  return String(value);
 }
 
 function groupByDay(items) {
