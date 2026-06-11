@@ -219,6 +219,8 @@ $env:COMFYUI_NEWS_LLM_MODEL = "gpt-4.1-mini"
 
 开启 `-LlmTriage` 时，审稿候选优先取 50–78 分灰区（`COMFYUI_NEWS_LLM_BAND_LOW/HIGH` 可调）和嘈杂渠道里的候选条目，把 LLM 预算花在规则最拿不准的地方。
 
+**创作者解读（deep-dive）**：命中当前模型族 + 解读信号（实测/详解/对比/参数/显存优化/benchmark 等）且不含新手营销/引流的内容会打上 `deep-dive` 标签，日报中有独立的「Creator Deep-dives」板块。有互动量（≥150）或作者粉丝量（≥5000）背书的解读会豁免 B 站教程类措辞的降分封顶（最高 86，仍低于一手官方新闻）；卖课、引流、网盘类硬噪声不受豁免。LLM 审稿对应的内容类型为 `model_deep_dive`（保留）与 `tutorial`（新手教学，降级）。把你信任的博主加进 `X_AUTHOR_ALLOWLIST` / `BILIBILI_AUTHOR_ALLOWLIST` 可以再叠加白名单权威加成。
+
 ## 抓取可靠性与增量抓取
 
 - 所有信源请求自带重试：瞬时网络错误和 408/429/5xx 会按指数退避重试，次数由 `COMFYUI_NEWS_HTTP_RETRIES` 控制（默认 3）。

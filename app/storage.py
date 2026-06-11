@@ -1235,6 +1235,7 @@ class Storage:
             "custom_nodes_workflows": [],
             "models": [],
             "video_image_models": [],
+            "creator_deep_dives": [],
             "community": [],
         }
         for item in items:
@@ -1249,6 +1250,8 @@ class Storage:
                 sections["models"].append(item)
             if {"model", "video", "image-generation", "quantization"} & tags:
                 sections["video_image_models"].append(item)
+            if "deep-dive" in tags:
+                sections["creator_deep_dives"].append(item)
             if item["category"] == "community":
                 sections["community"].append(item)
         return sections

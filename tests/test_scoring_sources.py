@@ -557,7 +557,9 @@ class ScoringTests(unittest.TestCase):
         self.assertIsNone(bilibili_score_cap("TripoSplat 现已在 ComfyUI 原生支持：从单图生成 3D 高斯泼溅模型"))
         self.assertLessEqual(sum(tutorial.values()), 56)
         self.assertLessEqual(sum(node_update_explainer.values()), 76)
-        self.assertLessEqual(sum(workflow_showcase.values()), 56)
+        # Adopted optimization workflows for current models now count as creator
+        # deep-dives (capped at 86) instead of generic showcases.
+        self.assertLessEqual(sum(workflow_showcase.values()), 86)
         self.assertGreater(sum(direct_news.values()), sum(tutorial.values()))
 
 

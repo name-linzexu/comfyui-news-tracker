@@ -27,9 +27,11 @@ from .scoring import (
     has_social_news_signal,
     has_strong_social_news_signal,
     is_beginner_or_course_marketing_text,
+    is_hard_low_value_bilibili_text,
     is_low_value_bilibili_text,
     is_low_value_social_text,
     is_low_value_x_text,
+    is_model_deep_dive,
     normalize_text,
     score_breakdown,
     score_item,
@@ -1220,6 +1222,17 @@ def build_item(
     tags = extract_tags(title, summary, source.category)
     if source.category == "official":
         tags = sorted({*tags, "official"})
+    is_creator_source = source.category == "community" or source.type in {
+        "bilibili_search",
+        "x_search",
+        "youtube_search",
+        "youtube_rss",
+        "discord_feed",
+        "forum_json",
+        "json_feed",
+    }
+    if is_creator_source and is_model_deep_dive(f"{title} {summary}"):
+        tags = sorted({*tags, "deep-dive"})
     breakdown = score_breakdown(
         title=title,
         summary=summary,
@@ -1581,6 +1594,13 @@ def is_low_value_t2_item(
         return is_low_value_x_text(text) and not has_social_news_signal(text)
     if source.type == "bilibili_search":
         if is_low_value_bilibili_text(text):
+            backed = (interaction_count_from_raw(raw) or 0) >= 150 or (
+                author_followers_from_raw(raw) or 0
+            ) >= 5000
+            if backed and is_model_deep_dive(text) and not is_hard_low_value_bilibili_text(text):
+                # Adopted creator deep-dives survive soft tutorial phrasing;
+                # the score cap still ranks them below first-party news.
+                return False
             return True
         return is_low_value_bilibili_candidate(text, raw)
     if source.type == "youtube_search":

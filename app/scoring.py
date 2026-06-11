@@ -711,6 +711,64 @@ def is_social_lead_gen_text(text: str) -> bool:
     return bool(SOCIAL_LEAD_GEN_RE.search(normalize_text(text).lower()))
 
 
+DEEP_DIVE_SIGNALS = (
+    "实测",
+    "评测",
+    "详解",
+    "精讲",
+    "深度解析",
+    "全解析",
+    "解读",
+    "拆解",
+    "讲解",
+    "对比",
+    "横评",
+    "参数",
+    "技巧",
+    "提速",
+    "加速",
+    "优化",
+    "显存",
+    "低显存",
+    "出图质量",
+    "踩坑",
+    "避坑",
+    "原理",
+    "deep dive",
+    "deep-dive",
+    "explained",
+    "explainer",
+    "hands-on",
+    "hands on",
+    "benchmark",
+    "comparison",
+    "compared",
+    "tips",
+    "optimization",
+    "optimize",
+    "optimized",
+    "in-depth",
+    "breakdown",
+    "vram",
+    "settings",
+    "best practices",
+)
+
+
+def is_model_deep_dive(text: str) -> bool:
+    """Quality second-hand interpretation of a current model family.
+
+    The opposite of beginner tutorials / course marketing: requires a known
+    model family plus concrete explanation, testing, or optimization signals.
+    """
+    value = normalize_text(text).lower()
+    if not vocab.mentions_model_family(value):
+        return False
+    if is_beginner_or_course_marketing_text(value) or is_social_lead_gen_text(value):
+        return False
+    return any(signal in value for signal in DEEP_DIVE_SIGNALS)
+
+
 def is_low_value_social_text(text: str) -> bool:
     value = normalize_text(text).lower()
     if is_beginner_or_course_marketing_text(value):
@@ -734,7 +792,39 @@ def is_low_value_x_text(text: str) -> bool:
     return is_low_value_social_text(text)
 
 
-def is_low_value_bilibili_text(text: str) -> bool:
+BILIBILI_EXTRA_LOW_VALUE = (
+    "nsfw",
+    "太变态",
+    "超变态",
+    "大熊",
+    "美女视频",
+    "真人演员",
+    "去水印",
+    "擦边",
+    "无限画布",
+    "每日分享三个",
+    "整合包",
+    "一键安装",
+    "网盘",
+    "秒杀 comfyui",
+    "低价好课",
+    "免费课程",
+    "课程推送",
+    "扫码",
+    "扫视频开头的码",
+    "公众号",
+    "公/众/号",
+    "技术交流",
+    "上车",
+)
+
+
+def is_hard_low_value_bilibili_text(text: str) -> bool:
+    """Noise that is never acceptable: marketing, lead-gen, unsafe, promo spam.
+
+    Tutorial/explainer phrasing is handled separately so quality deep-dives
+    can be exempted while this hard tier always stays filtered.
+    """
     value = normalize_text(text).lower()
     if any(word in value for word in UNSAFE_OR_LOW_VALUE):
         return True
@@ -742,36 +832,18 @@ def is_low_value_bilibili_text(text: str) -> bool:
         return True
     if is_social_lead_gen_text(value):
         return True
-    if is_bilibili_tutorial_or_promo_text(value):
+    if BILIBILI_HARD_PROMO_RE.search(value):
         return True
     if any(word in value for word in SOCIAL_LOW_VALUE_PHRASES):
         return True
-    bilibili_low_value = (
-        "nsfw",
-        "太变态",
-        "超变态",
-        "大熊",
-        "美女视频",
-        "真人演员",
-        "去水印",
-        "擦边",
-        "无限画布",
-        "每日分享三个",
-        "整合包",
-        "一键安装",
-        "网盘",
-        "秒杀 comfyui",
-        "低价好课",
-        "免费课程",
-        "课程推送",
-        "扫码",
-        "扫视频开头的码",
-        "公众号",
-        "公/众/号",
-        "技术交流",
-        "上车",
-    )
-    return any(word in value for word in bilibili_low_value)
+    return any(word in value for word in BILIBILI_EXTRA_LOW_VALUE)
+
+
+def is_low_value_bilibili_text(text: str) -> bool:
+    value = normalize_text(text).lower()
+    if is_hard_low_value_bilibili_text(value):
+        return True
+    return is_bilibili_tutorial_or_promo_text(value)
 
 
 def is_bilibili_tutorial_or_promo_text(text: str) -> bool:
@@ -785,10 +857,24 @@ def is_bilibili_tutorial_or_promo_text(text: str) -> bool:
     return False
 
 
-def bilibili_score_cap(text: str, interaction_count: int | None = None) -> int | None:
+def bilibili_score_cap(
+    text: str,
+    interaction_count: int | None = None,
+    author_followers: int | None = None,
+) -> int | None:
     value = normalize_text(text).lower()
-    if is_low_value_bilibili_text(value) or BILIBILI_HARD_PROMO_RE.search(value):
+    if is_hard_low_value_bilibili_text(value):
         return 48
+    # Quality creator interpretations of current models (hands-on tests,
+    # optimization breakdowns) with real adoption rank close to news.
+    deep_dive_backed = is_model_deep_dive(value) and (
+        (interaction_count or 0) >= 150 or (author_followers or 0) >= 5000
+    )
+    if is_low_value_bilibili_text(value):
+        # Only soft tutorial/explainer phrasing remains at this point.
+        return 86 if deep_dive_backed else 48
+    if deep_dive_backed:
+        return 86
     is_soft = bool(
         BILIBILI_SOFT_CONTENT_RE.search(value)
         or BILIBILI_TUTORIAL_NOISE_RE.search(value)
@@ -1097,7 +1183,7 @@ def score_breakdown(
             penalty -= total - 92
             total = 92
         elif source_type == "bilibili_search":
-            cap = bilibili_score_cap(text, interaction_count)
+            cap = bilibili_score_cap(text, interaction_count, author_followers)
             if cap is not None and total > cap:
                 penalty -= total - cap
                 total = cap

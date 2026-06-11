@@ -22,6 +22,10 @@ High-value items include:
 - new or meaningfully updated models, LoRAs, checkpoints, GGUF/FP8/NF4 builds
 - ComfyUI custom nodes, manager/front-end/CLI updates, workflow integrations
 - performance, VRAM, compatibility, runtime, or benchmark changes with concrete details
+- experienced creators' in-depth interpretations of recently released models:
+  hands-on tests, parameter/settings tips, VRAM or speed optimization breakdowns,
+  quality comparisons that help users actually adopt the new model
+  (content_type: model_deep_dive)
 
 Low-value items include:
 - beginner tutorials, installation walkthroughs, generic examples, course ads
@@ -29,11 +33,15 @@ Low-value items include:
 - showcases without a concrete new model, node, workflow, benchmark, or release
 - broad AI tool lists, unrelated Stable Diffusion chatter, questions, memes, unsafe content
 
+Distinguish carefully: a beginner install walkthrough is low-value "tutorial", but a
+concrete hands-on test or optimization guide for a current model is "model_deep_dive".
+
 Return strict JSON with keys:
 - decision: keep, downgrade, or reject
 - content_type: one of official_release, model_release, node_update, workflow_update,
-  performance_optimization, security_breaking, benchmark, tutorial, course_marketing,
-  lead_generation, showcase, question, duplicate_noise, unrelated, unsafe, unknown
+  performance_optimization, security_breaking, benchmark, model_deep_dive, tutorial,
+  course_marketing, lead_generation, showcase, question, duplicate_noise, unrelated,
+  unsafe, unknown
 - importance: integer 0-100
 - confidence: integer 0-100
 - reason: short Chinese explanation

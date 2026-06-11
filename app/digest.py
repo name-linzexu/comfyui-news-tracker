@@ -20,6 +20,7 @@ def render_markdown_digest(
     section_map = [
         ("Official / Primary", data["sections"].get("official", [])),
         ("Releases", data["sections"].get("releases", [])),
+        ("Creator Deep-dives", data["sections"].get("creator_deep_dives", [])),
         ("Custom Nodes / Workflows", data["sections"].get("custom_nodes_workflows", [])),
         ("Models", data["sections"].get("models", [])),
         ("Community", data["sections"].get("community", [])),

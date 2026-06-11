@@ -303,6 +303,110 @@ class EngagementSignalTests(unittest.TestCase):
         self.assertIsNone(author_followers_from_raw(None))
 
 
+class DeepDiveTests(unittest.TestCase):
+    def test_deep_dive_requires_family_and_signal_without_marketing(self) -> None:
+        from app.scoring import is_model_deep_dive
+
+        self.assertTrue(is_model_deep_dive("Wan 2.2 实测：低显存参数全解析"))
+        self.assertTrue(is_model_deep_dive("LTX 2.3 vs Wan 2.2 quality comparison and VRAM benchmark"))
+        self.assertFalse(is_model_deep_dive("零基础新手保姆级 Wan 2.2 教程，扫码领取资料"))
+        self.assertFalse(is_model_deep_dive("ComfyUI 工作流通用技巧"))
+
+    def test_backed_deep_dive_relaxes_bilibili_cap(self) -> None:
+        from app.scoring import bilibili_score_cap
+
+        text = "Wan 2.2 实测：低显存参数全解析与提速技巧"
+        self.assertEqual(bilibili_score_cap(text, 300), 86)
+        self.assertEqual(bilibili_score_cap(text, 20, 8000), 86)
+        self.assertLessEqual(bilibili_score_cap(text, 20) or 100, 76)
+
+    def test_build_item_tags_deep_dive_for_creator_sources(self) -> None:
+        from app.sources import Source, build_item
+
+        bilibili = Source(
+            id="bilibili-comfyui-models",
+            name="Bilibili",
+            type="bilibili_search",
+            url="local://bilibili-search?q=ComfyUI",
+            category="community",
+            weight=2,
+            tier="T2",
+        )
+        item = build_item(
+            source=bilibili,
+            title="Wan 2.2 实测：低显存参数全解析",
+            summary="ComfyUI 工作流下 Wan 2.2 模型的显存优化和参数对比。",
+            url="https://www.bilibili.com/video/BVdeep",
+            published_at=None,
+            keywords={"include": ["comfyui"], "exclude": []},
+            raw={"engagement": {"weighted": 400}},
+        )
+        self.assertIsNotNone(item)
+        assert item is not None
+        self.assertIn("deep-dive", item.tags)
+
+        commits = Source(
+            id="comfyui-commits-atom",
+            name="Commits",
+            type="rss",
+            url="https://github.com/comfyanonymous/ComfyUI/commits/master.atom",
+            category="official",
+            weight=5,
+            tier="T1",
+        )
+        commit_item = build_item(
+            source=commits,
+            title="feat: optimize Wan 2.2 attention vram",
+            summary="optimize attention",
+            url="https://github.com/comfyanonymous/ComfyUI/commit/x",
+            published_at=None,
+            keywords={"include": ["comfyui"], "exclude": []},
+        )
+        self.assertIsNotNone(commit_item)
+        assert commit_item is not None
+        self.assertNotIn("deep-dive", commit_item.tags)
+
+    def test_digest_has_creator_deep_dive_section(self) -> None:
+        from app.storage import utc_now
+
+        with TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.sqlite3")
+            storage.upsert_items(
+                [
+                    make_item(
+                        "dd1",
+                        "Wan 2.2 实测：低显存参数全解析",
+                        score=80,
+                        source_type="bilibili_search",
+                        category="community",
+                        tier="T2",
+                        published_at=utc_now(),
+                        tags=["community", "model", "deep-dive"],
+                    )
+                ]
+            )
+            digest = storage.daily_digest(limit=20)
+
+            section = digest["sections"].get("creator_deep_dives", [])
+            self.assertEqual(len(section), 1)
+            self.assertEqual(section[0]["guid"], "dd1")
+
+    def test_triage_keeps_model_deep_dive_content_type(self) -> None:
+        from app.llm_triage import normalize_triage_result
+
+        result = normalize_triage_result(
+            {
+                "decision": "keep",
+                "content_type": "model_deep_dive",
+                "importance": 78,
+                "confidence": 85,
+                "reason": "对新模型的实测解读",
+            }
+        )
+        self.assertEqual(result["decision"], "keep")
+        self.assertEqual(result["content_type"], "model_deep_dive")
+
+
 class TriagePriorityTests(unittest.TestCase):
     def test_gray_band_noisy_rows_lead(self) -> None:
         gray_noisy = {"score": 64, "source_type": "bilibili_search", "featured_candidate": False}
