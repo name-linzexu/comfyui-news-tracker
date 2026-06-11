@@ -9,6 +9,10 @@ param(
     [switch]$Json,
     [switch]$Quiet,
     [switch]$SkipInstall,
+    [switch]$LlmTriage,
+    [int]$LlmTriageLimit = 40,
+    [int]$LlmTriageMinScore = 45,
+    [switch]$LlmTriageIncludeReviewed,
     [switch]$OpenBrowser,
     [switch]$StartServer,
     [string]$Day,
@@ -75,6 +79,14 @@ try {
     if ($NoWebhook) { $argsList.Add("--no-webhook") }
     if ($Json) { $argsList.Add("--json") }
     if ($Quiet -or -not $Json) { $argsList.Add("--quiet") }
+    if ($LlmTriage) {
+        $argsList.Add("--llm-triage")
+        $argsList.Add("--llm-triage-limit")
+        $argsList.Add([string]$LlmTriageLimit)
+        $argsList.Add("--llm-triage-min-score")
+        $argsList.Add([string]$LlmTriageMinScore)
+    }
+    if ($LlmTriageIncludeReviewed) { $argsList.Add("--llm-triage-include-reviewed") }
 
     $started = Get-Date
     "[$($started.ToString("s"))] $python $($argsList -join ' ')" | Tee-Object -FilePath $logFile | Out-Host

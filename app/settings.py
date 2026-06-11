@@ -15,6 +15,13 @@ def env_int(name: str, default: int) -> int:
         return default
 
 
+def env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def env_secret(name: str, default_file: Path | None = None) -> str | None:
     value = os.getenv(name)
     if value:
@@ -37,6 +44,9 @@ class Settings:
     sources_path: Path = BASE_DIR / "config" / "sources.yml"
     static_dir: Path = BASE_DIR / "static"
     request_timeout: float = 20.0
+    http_retry_attempts: int = env_int("COMFYUI_NEWS_HTTP_RETRIES", 3)
+    rescore_window_days: int = env_int("COMFYUI_NEWS_RESCORE_DAYS", 14)
+    featured_channel_quotas: str = os.getenv("COMFYUI_NEWS_FEATURED_QUOTAS", "")
     user_agent: str = (
         "ComfyUI-News-Tracker/0.1 "
         "(https://github.com/local/comfyui-news-tracker; contact: local)"
@@ -50,11 +60,28 @@ class Settings:
     x_author_allowlist: str = os.getenv("X_AUTHOR_ALLOWLIST", "")
     bilibili_author_allowlist: str = os.getenv("BILIBILI_AUTHOR_ALLOWLIST", "")
     bilibili_cookie: str | None = env_secret("BILIBILI_COOKIE", BASE_DIR / ".secrets" / "bilibili_cookie.txt")
+    bilibili_detail_enabled: bool = env_bool("BILIBILI_DETAIL_ENABLED", True)
+    bilibili_reenrich_hours: int = env_int("BILIBILI_REENRICH_HOURS", 48)
+    bilibili_enrich_concurrency: int = env_int("BILIBILI_ENRICH_CONCURRENCY", 4)
+    bilibili_subtitle_text_enabled: bool = env_bool("BILIBILI_SUBTITLE_TEXT_ENABLED", True)
+    bilibili_subtitle_max_chars: int = env_int("BILIBILI_SUBTITLE_MAX_CHARS", 1200)
+    bilibili_asr_enabled: bool = env_bool("BILIBILI_ASR_ENABLED", False)
+    bilibili_asr_command: str = os.getenv("BILIBILI_ASR_COMMAND", "")
+    bilibili_asr_max_items: int = env_int("BILIBILI_ASR_MAX_ITEMS", 3)
+    bilibili_asr_min_weighted: int = env_int("BILIBILI_ASR_MIN_WEIGHTED", 250)
+    bilibili_asr_timeout_seconds: int = env_int("BILIBILI_ASR_TIMEOUT_SECONDS", 600)
     youtube_api_key: str | None = env_secret("YOUTUBE_API_KEY", BASE_DIR / ".secrets" / "youtube_api_key.txt")
     civitai_token: str | None = env_secret("CIVITAI_TOKEN", BASE_DIR / ".secrets" / "civitai_token.txt")
     openai_api_key: str | None = env_secret("OPENAI_API_KEY", BASE_DIR / ".secrets" / "openai_api_key.txt")
-    openai_base_url: str = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-    llm_model: str = os.getenv("COMFYUI_NEWS_LLM_MODEL", "gpt-4.1-mini")
+    openai_base_url: str = (
+        env_secret("OPENAI_BASE_URL", BASE_DIR / ".secrets" / "openai_base_url.txt") or "https://api.openai.com/v1"
+    )
+    llm_model: str = (
+        env_secret("COMFYUI_NEWS_LLM_MODEL", BASE_DIR / ".secrets" / "llm_model.txt") or "gpt-4.1-mini"
+    )
+    llm_triage_concurrency: int = env_int("COMFYUI_NEWS_LLM_CONCURRENCY", 4)
+    llm_triage_band_low: int = env_int("COMFYUI_NEWS_LLM_BAND_LOW", 50)
+    llm_triage_band_high: int = env_int("COMFYUI_NEWS_LLM_BAND_HIGH", 78)
     digest_timezone: str = os.getenv("COMFYUI_NEWS_TIMEZONE", "Asia/Shanghai")
     webhook_url: str | None = env_secret("COMFYUI_NEWS_WEBHOOK_URL", BASE_DIR / ".secrets" / "webhook_url.txt")
     webhook_timeout: float = float(os.getenv("COMFYUI_NEWS_WEBHOOK_TIMEOUT", "15"))

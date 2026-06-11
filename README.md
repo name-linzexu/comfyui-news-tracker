@@ -77,6 +77,22 @@ $env:X_AUTHOR_ALLOWLIST = "ComfyUI,comfyanonymous,kijai"
 $env:BILIBILI_AUTHOR_ALLOWLIST = "作者A,作者B"
 ```
 
+Bilibili 条目会默认补拉视频详情、完整简介、分 P/章节、可下载字幕文本，以及播放、点赞、投币、收藏、分享、评论和弹幕等互动指标。这些字段会写入 `raw.content_understanding` / `raw.engagement`，并在接口顶层返回 `engagement` 方便前端和 Agent 使用。若字幕拉取太慢，可以关闭：
+
+```powershell
+$env:BILIBILI_DETAIL_ENABLED = "1"
+$env:BILIBILI_SUBTITLE_TEXT_ENABLED = "0"
+```
+
+ASR 默认关闭，建议只给预筛后的高潜力 Bilibili 候选使用。配置本地 ASR/术语校正脚本后，采集器会把视频 URL、BV 号、标题和从简介/章节/字幕提取的术语通过环境变量传给脚本，并把脚本标准输出纳入 `raw.content_understanding.asr`：
+
+```powershell
+$env:BILIBILI_ASR_ENABLED = "1"
+$env:BILIBILI_ASR_COMMAND = ".\\scripts\\your-bilibili-asr.ps1"
+$env:BILIBILI_ASR_MAX_ITEMS = "3"
+$env:BILIBILI_ASR_MIN_WEIGHTED = "250"
+```
+
 YouTube 搜索需要 API key；未配置时会自动跳过，不算失败：
 
 ```powershell
@@ -128,6 +144,8 @@ Secrets can also be stored in ignored local files such as `.secrets/bilibili_coo
 .\scripts\collect.ps1 -Mode rescore
 ```
 
+注意：普通刷新结束时的隐式重打分只覆盖最近 `COMFYUI_NEWS_RESCORE_DAYS` 天（默认 14，设为 0 表示全量），避免数据库变大后每次刷新都全表重算。显式运行 `-Mode rescore` 仍然是全量重算，修改评分规则后想让历史条目也生效就用它。
+
 只抓某类信源，例如只抓 Bilibili 或只抓 X：
 
 ```powershell
@@ -145,12 +163,36 @@ Secrets can also be stored in ignored local files such as `.secrets/bilibili_coo
 .\scripts\collect.ps1 -IncludeType forum_json
 ```
 
-可选 LLM 后处理默认不运行，只有显式设置 `OPENAI_API_KEY` 并运行脚本才会消耗 API。它会给高分条目生成中文摘要、中文标题和更稳定的聚类键：
+模型平台抓取包含两类入口：一类是 ComfyUI/Flux/Wan/Qwen/LTX 等已知生态关键词，另一类是 Hugging Face/Civitai 的广谱新模型发现，例如 `text-to-image`、`image-to-video`、`text-to-video`、`video generation`、`diffusers`、`checkpoint`、`lora` 等。后者用于发现尚未写进关键词表的新开源图像/视频模型；建议配合 `-LlmTriage` 使用，降低纯展示、教程和营销内容进入精选的概率。
+
+可选 LLM 后处理默认不运行，只有配置了 API key 并显式运行脚本才会消耗 API。任何 OpenAI 兼容端点都可以用——除了环境变量，也支持放在忽略的本地文件里（环境变量优先）：
+
+```text
+.secrets/openai_api_key.txt    # API key（OPENAI_API_KEY）
+.secrets/openai_base_url.txt   # 端点，如 https://api.xiaomimimo.com/v1（OPENAI_BASE_URL）
+.secrets/llm_model.txt         # 模型名，如 mimo-v2.5（COMFYUI_NEWS_LLM_MODEL）
+```
+
+审稿对模型输出做了容错解析（markdown 代码栏、前后缀文本都能解），单条约 600 token，40 条一轮在 MiMo v2.5 上约几分钱。它会给高分条目生成中文摘要、中文标题和更稳定的聚类键：
 
 ```powershell
 $env:OPENAI_API_KEY = "<your-openai-api-key>"
 $env:COMFYUI_NEWS_LLM_MODEL = "gpt-4.1-mini"
 .\.venv\Scripts\python.exe scripts\llm_enrich.py --limit 20
+```
+
+如果需要先理解内容再筛选，可以开启 LLM 审稿。它会读取候选条目的标题、摘要、来源、标签和原始字段，判断是发布/模型/节点/性能更新，还是教程、卖课、评论区领取、纯展示、闲聊等低价值内容，然后写回 `score`、`featured`、`reason` 和 `raw.llm_triage`：
+
+```powershell
+$env:OPENAI_API_KEY = "<your-openai-api-key>"
+$env:COMFYUI_NEWS_LLM_MODEL = "gpt-4.1-mini"
+.\scripts\collect.ps1 -Mode all -LlmTriage -LlmTriageLimit 40 -LlmTriageMinScore 45
+```
+
+也可以只审已有数据库，不重新抓取：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\llm_triage.py --limit 60 --min-score 45
 ```
 
 只启动 Web 服务：
@@ -160,6 +202,30 @@ $env:COMFYUI_NEWS_LLM_MODEL = "gpt-4.1-mini"
 ```
 
 脚本会把每次刷新日志写入 `data/logs/refresh-YYYYMMDD-HHMMSS.log`，依赖安装也会按 `requirements.txt` 的哈希缓存；依赖没变时不会反复 `pip install`。
+
+## 推荐架构
+
+精选（featured）分两段决定：
+
+1. **逐条候选**：抓取/重打分时按规则评出 `featured_candidate`（资格位），评分包含若干针对性封顶——commit 按前缀分类（`feat:`/`perf:` 不封顶，`fix:` 沿用 bugfix 上限，`chore:`/`docs:` 等封 48，`mm:`/`main:` 之类内部子系统前缀在 commit 源里封 62）；Hugging Face 按作者分级（官方组织加权 +14、可信转档作者 +8、未知作者的已知模型族转档按采用度封 58/72、未知作者且无下载量封 60）；Civitai 角色/人脸/动漫 LoRA 封 56；社区 RSS 提问帖封 56、无新闻信号封 76；关键词堆叠的 relevance 封 32。
+2. **选片器**：每次采集/重打分后运行，在每个日报日内**按事件簇去重**（同一事件只保留分数/层级最高的一条），再按渠道配额裁剪（默认每天 x:6、bilibili:6、models:8、youtube:4、community:8、forum:6、discord:6；官方/T1 不限量），写回最终 `featured`。配额可用 `COMFYUI_NEWS_FEATURED_QUOTAS="x:8,models:10"` 覆盖。
+
+模型族、官方组织、可信转档作者集中在 `app/vocab.py`，也可在 `config/sources.yml` 顶部加 `vocab:` 段扩充——新模型族只需改一处，打标、精选规则、聚类键、B 站术语全部自动生效。
+
+互动与作者影响力信号：
+
+- **互动速度**：popularity 分量按「加权互动 ÷ 发布天数」取对数计分（约 10/天 +7、100/天 +14、1000/天 +21，封顶 28），爆款有区分度，老内容不能靠存量互动刷分；条目在 rescore 窗口内会随时间自然衰减。
+- **作者粉丝量**：X 通过 `user.fields=public_metrics` 拿粉丝数（同一请求免费字段）、B 站对新视频补全时拉一次 UP 主卡片（每作者每轮只查一次）、YouTube 批量查频道订阅数。写入 `raw.engagement.author_followers`，按对数进 authority 分量（1k +4、10k +8、100k +12，封顶 16），与白名单 `*_AUTHOR_ALLOWLIST` 叠加，白名单仍是更强信号。
+
+开启 `-LlmTriage` 时，审稿候选优先取 50–78 分灰区（`COMFYUI_NEWS_LLM_BAND_LOW/HIGH` 可调）和嘈杂渠道里的候选条目，把 LLM 预算花在规则最拿不准的地方。
+
+## 抓取可靠性与增量抓取
+
+- 所有信源请求自带重试：瞬时网络错误和 408/429/5xx 会按指数退避重试，次数由 `COMFYUI_NEWS_HTTP_RETRIES` 控制（默认 3）。
+- GitHub 搜索请求会在单次刷新内串行执行并加间隔，命中 rate limit 时按 `Retry-After` / `x-ratelimit-reset` 等待后重试（封顶 90 秒），避免之前并发突发导致的 403。
+- B 站增量抓取：已入库且补全过详情/字幕的视频默认不再重复拉取（发布不足 `BILIBILI_REENRICH_HOURS` 小时的视频仍会刷新互动数据，默认 48）。因此 B 站源的 `fetched` 计数只反映本次真正抓取的新视频。新视频的详情/字幕补全按 `BILIBILI_ENRICH_CONCURRENCY` 并发执行（默认 4；开启 ASR 时自动回退为串行以保持预算语义）。
+- LLM 审稿结果写入 `raw.llm_triage` 后会在后续刷新和重打分中保留并继续生效，不会被关键词分覆盖，也不会对同一条目重复花 API 费用。审稿请求按 `COMFYUI_NEWS_LLM_CONCURRENCY` 并发（默认 4），单条失败不会中断整轮，摘要中会以 `failed` 计数显示。
+- 每个信源的抓取耗时（`duration_ms`）会记录在刷新结果里，可通过 `/api/source-health` 和 `/api/stats` 查看，便于定位慢源。
 
 ## 常用命令
 

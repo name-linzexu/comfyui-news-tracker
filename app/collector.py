@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass
+from datetime import timedelta
 from urllib.parse import urlparse
 
 import httpx
@@ -51,13 +53,24 @@ async def collect_once(
         source_ids=source_ids,
         skip_source_ids=skip_source_ids,
     )
-    fetcher = Fetcher()
     errors: list[str] = []
     active_sources, skipped_results = partition_sources(sources)
     skipped_results = [*filtered_results, *skipped_results]
+    bilibili_known_urls: set[str] = set()
+    if any(source.type == "bilibili_search" for source in active_sources):
+        bilibili_known_urls = storage.enriched_bilibili_urls()
+    fetcher = Fetcher(bilibili_known_urls=bilibili_known_urls)
+
+    async def fetch_timed(source: Source) -> tuple[list[NewsItem] | Exception, int]:
+        started = time.perf_counter()
+        try:
+            fetched = await fetcher.fetch_source(source, keywords)
+        except Exception as exc:
+            return exc, int((time.perf_counter() - started) * 1000)
+        return fetched, int((time.perf_counter() - started) * 1000)
+
     try:
-        tasks = [fetcher.fetch_source(source, keywords) for source in active_sources]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        results = await asyncio.gather(*(fetch_timed(source) for source in active_sources))
     finally:
         await fetcher.close()
 
@@ -65,7 +78,7 @@ async def collect_once(
     succeeded_sources = 0
     source_results: list[dict[str, object]] = []
     source_results.extend(skipped_results)
-    for source, result in zip(active_sources, results, strict=False):
+    for source, (result, duration_ms) in zip(active_sources, results, strict=False):
         if isinstance(result, Exception):
             error = str(result)
             errors.append(error)
@@ -79,6 +92,7 @@ async def collect_once(
                     "status": "failed",
                     "fetched": 0,
                     "error": error,
+                    "duration_ms": duration_ms,
                 }
             )
             continue
@@ -93,12 +107,23 @@ async def collect_once(
                 "status": "ok",
                 "fetched": len(result),
                 "error": "",
+                "duration_ms": duration_ms,
             }
         )
         items.extend(result)
 
     upsert = storage.upsert_items(items)
-    rescored = storage.rescore_items({source.id: source for source in all_sources}, keywords)
+    rescore_since = (
+        utc_now() - timedelta(days=settings.rescore_window_days)
+        if settings.rescore_window_days > 0
+        else None
+    )
+    rescored = storage.rescore_items(
+        {source.id: source for source in all_sources},
+        keywords,
+        since=rescore_since,
+    )
+    featured_selection = storage.select_featured(since=rescore_since)
     result = CollectResult(
         fetched=len(items),
         saved=upsert.changed + rescored,
@@ -114,13 +139,16 @@ async def collect_once(
         started_at=started_at.isoformat(),
         finished_at=utc_now().isoformat(),
     )
-    result_data = result.__dict__
+    result_data = dict(result.__dict__)
+    result_data["featured_selection"] = featured_selection
     storage.set_metadata("last_collect_result", result_data)
     storage.record_collect_run(result_data)
     webhook_result = await notify_webhook(storage, result_data) if send_webhook else None
     if webhook_result:
         result_data["webhook"] = webhook_result
-        result = CollectResult(**result_data)
+        result = CollectResult(
+            **{key: value for key, value in result_data.items() if key in CollectResult.__dataclass_fields__}
+        )
         storage.set_metadata("last_collect_result", result_data)
     return result
 
@@ -206,6 +234,7 @@ def skipped_source_result(source: Source, reason: str) -> dict[str, object]:
         "fetched": 0,
         "error": "",
         "reason": reason,
+        "duration_ms": 0,
     }
 
 

@@ -7,7 +7,10 @@ param(
 
     [string]$At = "09:00",
     [int]$EveryHours = 2,
-    [switch]$NoWebhook
+    [switch]$NoWebhook,
+    [switch]$LlmTriage,
+    [int]$LlmTriageLimit = 40,
+    [int]$LlmTriageMinScore = 45
 )
 
 $ErrorActionPreference = "Stop"
@@ -23,6 +26,9 @@ if (-not (Test-Path (Join-Path $project ".venv\Scripts\python.exe"))) {
 $collectArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$script`" -Mode $Mode -Quiet"
 if ($NoWebhook) {
     $collectArgs += " -NoWebhook"
+}
+if ($LlmTriage) {
+    $collectArgs += " -LlmTriage -LlmTriageLimit $LlmTriageLimit -LlmTriageMinScore $LlmTriageMinScore"
 }
 
 $action = New-ScheduledTaskAction `
@@ -47,9 +53,12 @@ else {
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
 
 Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Force | Out-Null
+$actionText = "collect.ps1 -Mode $Mode -Quiet"
+if ($NoWebhook) { $actionText += " -NoWebhook" }
+if ($LlmTriage) { $actionText += " -LlmTriage -LlmTriageLimit $LlmTriageLimit -LlmTriageMinScore $LlmTriageMinScore" }
 Write-Host "Installed scheduled task: $taskName"
 Write-Host "Schedule: $scheduleText"
-Write-Host "Action: collect.ps1 -Mode $Mode -Quiet"
+Write-Host "Action: $actionText"
 if (-not $env:COMFYUI_NEWS_WEBHOOK_URL -and -not (Test-Path (Join-Path $project ".secrets\webhook_url.txt"))) {
     Write-Host "Webhook is not configured. Add COMFYUI_NEWS_WEBHOOK_URL or .secrets\webhook_url.txt if you want external push delivery."
 }

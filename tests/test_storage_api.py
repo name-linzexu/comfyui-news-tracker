@@ -20,6 +20,7 @@ from app.collector import (
 )
 import app.main as main_module
 from app.digest import render_markdown_digest, webhook_payload
+from app.llm_triage import apply_triage_result, normalize_triage_result
 from app.main import app
 from app.models import NewsItem
 from app.settings import settings
@@ -27,6 +28,8 @@ from app.sources import (
     Fetcher,
     Source,
     author_is_allowlisted,
+    bilibili_content_understanding,
+    bilibili_engagement,
     bilibili_search_terms,
     clean_x_text,
     json_feed_headers,
@@ -34,6 +37,7 @@ from app.sources import (
     json_row_engagement,
     json_row_url,
     load_sources,
+    model_discovery_queries,
     parse_compact_count,
     parse_x_author,
     resolve_source_url,
@@ -108,6 +112,44 @@ class StorageTests(unittest.TestCase):
             row = storage.list_items(limit=1, include_raw=True)[0]
 
             self.assertEqual(row["raw"]["llm"]["zh_summary"], "中文摘要")
+
+    def test_llm_triage_low_value_type_overrides_keep_decision(self) -> None:
+        result = normalize_triage_result(
+            {
+                "decision": "keep",
+                "content_type": "lead_generation",
+                "importance": 72,
+                "confidence": 90,
+                "reason": "评论区领取工作流，不是公开发布信息",
+            }
+        )
+
+        self.assertEqual(result["decision"], "reject")
+        self.assertEqual(result["content_type"], "lead_generation")
+
+    def test_llm_triage_result_can_downgrade_existing_featured_item(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.sqlite3")
+            storage.upsert_items([make_item("triage-a", "ComfyUI Flux workflow course", score=88, featured=True)])
+            row = storage.list_items(limit=1, include_raw=True)[0]
+            result = normalize_triage_result(
+                {
+                    "decision": "reject",
+                    "content_type": "course_marketing",
+                    "importance": 18,
+                    "confidence": 92,
+                    "reason": "卖课宣传，没有模型或节点更新",
+                    "signals": ["paid course"],
+                }
+            )
+
+            apply_triage_result(storage, row, result)
+            updated = storage.list_items(limit=1, featured=None, include_raw=True)[0]
+
+            self.assertFalse(updated["featured"])
+            self.assertLessEqual(updated["score"], 20)
+            self.assertIn("LLM triage rejected", updated["reason"])
+            self.assertEqual(updated["raw"]["llm_triage"]["content_type"], "course_marketing")
 
     def test_sources_can_require_token_and_partition_skips_without_token(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -371,6 +413,65 @@ sources:
         self.assertIn("ComfyUI 低显存", terms)
         self.assertIn("ComfyUI 量化", terms)
 
+    def test_bilibili_engagement_prefers_detail_stats(self) -> None:
+        video = {"play": 1000, "favorites": 3, "review": 4}
+        detail = {
+            "stat": {
+                "view": 2000,
+                "like": 50,
+                "coin": 7,
+                "favorite": 9,
+                "share": 5,
+                "reply": 11,
+                "danmaku": 40,
+            }
+        }
+
+        engagement = bilibili_engagement(video, detail)
+
+        self.assertEqual(engagement["views"], 2000)
+        self.assertEqual(engagement["likes"], 50)
+        self.assertEqual(engagement["coins"], 7)
+        self.assertEqual(engagement["favorites"], 9)
+        self.assertEqual(engagement["shares"], 5)
+        self.assertEqual(engagement["comments"], 11)
+        self.assertEqual(engagement["danmaku"], 40)
+        self.assertEqual(engagement["weighted"], 212)
+
+    def test_bilibili_content_understanding_uses_description_pages_chapters_and_subtitle(self) -> None:
+        video = {"title": "ComfyUI demo", "description": "short search text"}
+        detail = {
+            "desc": "Ideogram-4 image workflow with QwenVL verification.",
+            "dynamic": "Flux and Wan compatibility notes.",
+            "pages": [{"part": "setup"}, {"part": "QwenVL image check"}],
+        }
+        player = {
+            "view_points": [{"content": "model comparison"}],
+            "subtitle": {"subtitles": [{"lan_doc": "English", "subtitle_url": "//example.test/sub.json"}]},
+        }
+
+        context = bilibili_content_understanding(video, detail, player, "ComfyUI QwenVL subtitle text")
+
+        self.assertIn("Ideogram", context["terms"])
+        self.assertIn("QwenVL", context["terms"])
+        self.assertIn("Pages: setup / QwenVL image check", context["summary"])
+        self.assertIn("Chapters: model comparison", context["summary"])
+        self.assertIn("Subtitle: ComfyUI QwenVL subtitle text", context["summary"])
+        self.assertTrue(context["subtitle_available"])
+
+    def test_model_discovery_sources_are_not_limited_to_known_model_names(self) -> None:
+        sources, keywords = load_sources()
+        source_ids = {source.id for source in sources}
+        queries = model_discovery_queries(
+            "text-to-image|image-to-video|text-to-image|diffusers",
+            default="ComfyUI",
+        )
+
+        self.assertIn("huggingface-open-model-discovery", source_ids)
+        self.assertIn("civitai-open-model-discovery", source_ids)
+        self.assertEqual(queries, ["text-to-image", "image-to-video", "diffusers"])
+        self.assertIn("diffusers", keywords["include"])
+
     def test_old_social_channel_is_not_supported(self) -> None:
         client = TestClient(app)
         response = client.get("/api/items?channel=social")
@@ -382,10 +483,12 @@ sources:
             storage.upsert_items([make_item("chore", "chore: remove unused import", score=95, featured=True)])
             source = load_sources()[0][0]
             changed = storage.rescore_items({"test-source": source}, {"include": ["comfyui"], "exclude": []})
+            storage.select_featured()
             rows = storage.list_items(limit=10)
 
             self.assertEqual(changed, 1)
             self.assertFalse(rows[0]["featured"])
+            self.assertFalse(rows[0]["featured_candidate"])
 
     def test_rescore_items_deprioritizes_low_value_social_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -404,11 +507,13 @@ sources:
             )
             source = next(source for source in load_sources()[0] if source.id == "x-comfyui-models")
             changed = storage.rescore_items({"test-source": source}, {"include": ["comfyui"], "exclude": []})
+            storage.select_featured()
             rows = storage.list_items(limit=10)
 
             self.assertEqual(changed, 1)
             self.assertLessEqual(rows[0]["score"], 48)
             self.assertFalse(rows[0]["featured"])
+            self.assertFalse(rows[0]["featured_candidate"])
 
     def test_keyword_search_treats_agent_input_as_plain_text(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -416,17 +521,20 @@ sources:
             storage.upsert_items(
                 [
                     make_item("manager", "ComfyUI-Manager: Flux 2 workflow", score=80, featured=True),
+                    make_item("ideo", "Ideogram 3.0 model workflow update", score=75, featured=True),
                     make_item("other", "Plain ComfyUI update", score=40, featured=False),
                 ]
             )
 
-            self.assertEqual(normalize_fts_query("ComfyUI-Manager: Flux 2"), '"comfyui" "manager" "flux" "2"')
+            self.assertEqual(normalize_fts_query("ComfyUI-Manager: Flux 2"), "comfyui* manager* flux* 2")
             rows = storage.list_items(limit=10, query="ComfyUI-Manager: Flux 2")
             count = storage.count_items(query="ComfyUI-Manager: Flux 2")
             facets = storage.item_facets(query="ComfyUI-Manager: Flux 2")
             clusters = storage.list_clusters(limit=5, query="ComfyUI-Manager: Flux 2")
+            partial_rows = storage.list_items(limit=10, query="ideo")
 
             self.assertEqual([row["guid"] for row in rows], ["manager"])
+            self.assertEqual([row["guid"] for row in partial_rows], ["ideo"])
             self.assertEqual(count, 1)
             self.assertEqual(facets["total"], 1)
             self.assertEqual(clusters[0]["items"][0]["guid"], "manager")
@@ -818,11 +926,12 @@ class ApiSmokeTests(unittest.TestCase):
         self.assertEqual(channel_data["total"], 3)
 
     def test_public_items_endpoint_matches_agent_shape(self) -> None:
+        recent = datetime.now(UTC)
         main_module.storage.upsert_items(
             [
-                make_item("public-a", "Public A", score=90, featured=True),
-                make_item("public-b", "Public B", score=50, featured=False),
-                make_item("public-c", "Public C", score=40, featured=True),
+                make_item("public-a", "Public A", score=90, featured=True, published_at=recent),
+                make_item("public-b", "Public B", score=50, featured=False, published_at=recent),
+                make_item("public-c", "Public C", score=40, featured=True, published_at=recent),
                 make_item(
                     "public-old",
                     "Public Old",
@@ -930,10 +1039,11 @@ class ApiSmokeTests(unittest.TestCase):
         self.assertEqual(data["days"][0]["top_item"]["title"], "Archive A")
 
     def test_public_briefing_compacts_agent_consumption(self) -> None:
+        recent = datetime.now(UTC)
         main_module.storage.upsert_items(
             [
-                make_item("briefing-a", "Briefing A", score=95, featured=True),
-                make_item("briefing-b", "Briefing B", score=60, featured=False),
+                make_item("briefing-a", "Briefing A", score=95, featured=True, published_at=recent),
+                make_item("briefing-b", "Briefing B", score=60, featured=False, published_at=recent),
             ]
         )
         client = TestClient(app)

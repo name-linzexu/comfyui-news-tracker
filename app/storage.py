@@ -14,11 +14,59 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .models import NewsItem
+from .scoring import apply_llm_triage
 from .settings import settings
 
 
 FTS_TOKEN_PATTERN = re.compile(r"[\w]+", re.UNICODE)
 DEFAULT_DIGEST_TIMEZONE = "Asia/Shanghai"
+DAILY_DIGEST_MIN_SCORE = 50
+
+FEATURED_TIER_RANK = {"T1": 3, "T1.5": 2, "T2": 1}
+# Per digest-day featured quotas by channel. Channels not listed are unlimited
+# (official/T1 releases should never be cut by a quota).
+DEFAULT_FEATURED_CHANNEL_QUOTAS = {
+    "x": 6,
+    "bilibili": 6,
+    "models": 8,
+    "youtube": 4,
+    "community": 8,
+    "forum": 6,
+    "discord": 6,
+}
+
+
+def featured_channel_for(source_type: str, category: str) -> str:
+    if source_type == "x_search":
+        return "x"
+    if source_type == "bilibili_search":
+        return "bilibili"
+    if source_type in {"huggingface_models", "civitai_models"}:
+        return "models"
+    if source_type in {"youtube_search", "youtube_rss"}:
+        return "youtube"
+    if source_type == "discord_feed":
+        return "discord"
+    if source_type in {"forum_json", "json_feed"}:
+        return "forum"
+    if source_type.startswith("github_"):
+        return "github"
+    if category == "community":
+        return "community"
+    return "core"
+
+
+def featured_quotas() -> dict[str, int]:
+    quotas = dict(DEFAULT_FEATURED_CHANNEL_QUOTAS)
+    for part in (settings.featured_channel_quotas or "").split(","):
+        name, separator, value = part.partition(":")
+        if not separator:
+            continue
+        try:
+            quotas[name.strip().lower()] = max(0, int(value))
+        except ValueError:
+            continue
+    return quotas
 
 
 @dataclass(frozen=True)
@@ -87,7 +135,13 @@ def normalize_fts_query(value: str | None) -> str | None:
     tokens = FTS_TOKEN_PATTERN.findall(value.lower())
     if not tokens:
         return None
-    return " ".join(f'"{token}"' for token in tokens[:12])
+    return " ".join(fts_query_term(token) for token in tokens[:12])
+
+
+def fts_query_term(token: str) -> str:
+    if len(token) <= 1:
+        return token
+    return f"{token}*"
 
 
 class Storage:
@@ -150,6 +204,8 @@ class Storage:
             self._ensure_column(conn, "items", "score_breakdown", "TEXT NOT NULL DEFAULT '{}'")
             self._ensure_column(conn, "items", "cluster_key", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(conn, "items", "cluster_title", "TEXT NOT NULL DEFAULT ''")
+            if self._ensure_column(conn, "items", "featured_candidate", "INTEGER NOT NULL DEFAULT 0"):
+                conn.execute("UPDATE items SET featured_candidate = featured")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_items_tier ON items(source_tier)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_items_cluster ON items(cluster_key)")
             conn.execute(
@@ -223,7 +279,7 @@ class Storage:
             for item in items:
                 existing = conn.execute(
                     """
-                    SELECT title, summary, url, published_at, score, featured, tags,
+                    SELECT title, summary, url, published_at, score, featured, featured_candidate, tags,
                            source_tier, reason, score_breakdown, cluster_key, cluster_title, author, raw
                     FROM items
                     WHERE guid = ?
@@ -231,15 +287,19 @@ class Storage:
                     (item.guid,),
                 ).fetchone()
                 item = self._merge_existing_enrichment(existing, item)
+                item = self._apply_stored_triage(item)
                 values = self._item_values(item)
+                # NewsItem.featured is the per-item eligibility (candidate); the
+                # final featured flag is owned by select_featured(), so conflicts
+                # only refresh the candidate column.
                 conn.execute(
                     """
                     INSERT INTO items (
                         guid, source_id, source_name, source_type, category, title, summary, url,
-                        published_at, fetched_at, score, featured, tags, source_tier, reason,
+                        published_at, fetched_at, score, featured, featured_candidate, tags, source_tier, reason,
                         score_breakdown, cluster_key, cluster_title, author, raw
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(guid) DO UPDATE SET
                         source_id=excluded.source_id,
                         source_name=excluded.source_name,
@@ -251,7 +311,7 @@ class Storage:
                         published_at=excluded.published_at,
                         fetched_at=excluded.fetched_at,
                         score=excluded.score,
-                        featured=excluded.featured,
+                        featured_candidate=excluded.featured_candidate,
                         tags=excluded.tags,
                         source_tier=excluded.source_tier,
                         reason=excluded.reason,
@@ -263,11 +323,12 @@ class Storage:
                     """,
                     values,
                 )
-                conn.execute("DELETE FROM item_search WHERE guid = ?", (item.guid,))
-                conn.execute(
-                    "INSERT INTO item_search(guid, title, summary, tags) VALUES (?, ?, ?, ?)",
-                    (item.guid, item.title, item.summary, " ".join(item.tags)),
-                )
+                if existing is None or self._search_row_changed(existing, item):
+                    conn.execute("DELETE FROM item_search WHERE guid = ?", (item.guid,))
+                    conn.execute(
+                        "INSERT INTO item_search(guid, title, summary, tags) VALUES (?, ?, ?, ?)",
+                        (item.guid, item.title, item.summary, " ".join(item.tags)),
+                    )
                 if existing is None:
                     inserted += 1
                 elif self._row_changed(existing, item):
@@ -276,12 +337,24 @@ class Storage:
                     unchanged += 1
         return UpsertResult(inserted=inserted, updated=updated, unchanged=unchanged)
 
-    def rescore_items(self, sources_by_id: dict[str, Any], keywords: dict[str, list[str]]) -> int:
+    def rescore_items(
+        self,
+        sources_by_id: dict[str, Any],
+        keywords: dict[str, list[str]],
+        *,
+        since: datetime | None = None,
+    ) -> int:
         from .sources import build_item
 
         changed = 0
         with self.connection() as conn:
-            rows = conn.execute("SELECT * FROM items").fetchall()
+            if since is not None:
+                rows = conn.execute(
+                    "SELECT * FROM items WHERE published_at >= ?",
+                    (since.astimezone(UTC).isoformat(),),
+                ).fetchall()
+            else:
+                rows = conn.execute("SELECT * FROM items").fetchall()
             for row in rows:
                 source = sources_by_id.get(row["source_id"])
                 if not source:
@@ -300,7 +373,7 @@ class Storage:
                     github_stars=int(github_stars) if github_stars is not None else None,
                 )
                 if item is None:
-                    if int(row["score"] or 0) == 0 and not bool(row["featured"]):
+                    if int(row["score"] or 0) == 0 and not bool(row["featured"]) and not bool(row["featured_candidate"]):
                         continue
                     conn.execute(
                         """
@@ -308,6 +381,7 @@ class Storage:
                         SET
                             score = 0,
                             featured = 0,
+                            featured_candidate = 0,
                             reason = ?,
                             score_breakdown = ?
                         WHERE guid = ?
@@ -320,6 +394,7 @@ class Storage:
                     )
                     changed += 1
                     continue
+                item = self._apply_stored_triage(item)
                 if not self._row_changed(row, item):
                     continue
                 conn.execute(
@@ -327,7 +402,7 @@ class Storage:
                     UPDATE items
                     SET
                         score = ?,
-                        featured = ?,
+                        featured_candidate = ?,
                         tags = ?,
                         source_tier = ?,
                         reason = ?,
@@ -350,6 +425,92 @@ class Storage:
                 )
                 changed += 1
         return changed
+
+    def enriched_bilibili_urls(self) -> set[str]:
+        with self.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT url FROM items
+                WHERE source_type = 'bilibili_search'
+                  AND json_extract(raw, '$.content_understanding') IS NOT NULL
+                """
+            ).fetchall()
+        return {row["url"] for row in rows}
+
+    def select_featured(self, *, since: datetime | None = None) -> dict[str, int]:
+        """Finalize the featured flag from per-item candidates.
+
+        Within each digest day: keep only the best item per event cluster, then
+        apply per-channel quotas so one noisy channel cannot flood the feed.
+        """
+        quotas = featured_quotas()
+        with self.connection() as conn:
+            clauses = []
+            params: list[Any] = []
+            if since is not None:
+                clauses.append("published_at >= ?")
+                params.append(since.astimezone(UTC).isoformat())
+            where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+            rows = conn.execute(
+                f"""
+                SELECT guid, source_type, category, source_tier, score, featured,
+                       featured_candidate, cluster_key, published_at
+                FROM items
+                {where}
+                """,
+                params,
+            ).fetchall()
+
+            def rank(row: sqlite3.Row) -> tuple[int, int, str]:
+                return (
+                    int(row["score"] or 0),
+                    FEATURED_TIER_RANK.get(row["source_tier"], 0),
+                    row["published_at"] or "",
+                )
+
+            by_day: dict[str, list[sqlite3.Row]] = {}
+            for row in rows:
+                if not row["featured_candidate"]:
+                    continue
+                day = digest_day_for(row["published_at"]) or "unknown"
+                by_day.setdefault(day, []).append(row)
+
+            selected: set[str] = set()
+            demoted_duplicates = 0
+            demoted_quota = 0
+            for day_rows in by_day.values():
+                clusters: dict[str, list[sqlite3.Row]] = {}
+                for row in day_rows:
+                    key = row["cluster_key"] or f"guid:{row['guid']}"
+                    clusters.setdefault(key, []).append(row)
+                winners: list[sqlite3.Row] = []
+                for group in clusters.values():
+                    group.sort(key=rank, reverse=True)
+                    winners.append(group[0])
+                    demoted_duplicates += len(group) - 1
+                by_channel: dict[str, list[sqlite3.Row]] = {}
+                for row in winners:
+                    channel = featured_channel_for(row["source_type"], row["category"])
+                    by_channel.setdefault(channel, []).append(row)
+                for channel, group in by_channel.items():
+                    limit = quotas.get(channel)
+                    group.sort(key=rank, reverse=True)
+                    kept = group if limit is None else group[: max(0, limit)]
+                    demoted_quota += len(group) - len(kept)
+                    selected.update(row["guid"] for row in kept)
+
+            changed = 0
+            for row in rows:
+                desired = 1 if row["guid"] in selected else 0
+                if int(row["featured"] or 0) != desired:
+                    conn.execute("UPDATE items SET featured = ? WHERE guid = ?", (desired, row["guid"]))
+                    changed += 1
+        return {
+            "selected": len(selected),
+            "demoted_duplicates": demoted_duplicates,
+            "demoted_quota": demoted_quota,
+            "changed": changed,
+        }
 
     def list_items(
         self,
@@ -651,8 +812,8 @@ class Storage:
 
     def daily_digest(self, *, day: str | None = None, limit: int = 30, channel: str | None = None) -> dict[str, Any]:
         digest_day, start, end = digest_day_bounds(day)
-        clauses = ["i.published_at >= ?", "i.published_at < ?"]
-        params: list[Any] = [start, end]
+        clauses = ["i.published_at >= ?", "i.published_at < ?", "i.score >= ?"]
+        params: list[Any] = [start, end, DAILY_DIGEST_MIN_SCORE]
         self._append_channel_clause(clauses, params, channel)
         where = " AND ".join(clauses)
 
@@ -882,6 +1043,9 @@ class Storage:
                         "last_ok": None,
                         "last_error": "",
                         "last_skip_reason": "",
+                        "duration_ms_total": 0,
+                        "duration_runs": 0,
+                        "last_duration_ms": None,
                     },
                 )
                 row["runs"] += 1
@@ -889,6 +1053,12 @@ class Storage:
                     row["skipped"] += 1
                     row["last_skip_reason"] = row["last_skip_reason"] or source.get("reason", "")
                     continue
+                duration_ms = source.get("duration_ms")
+                if duration_ms is not None:
+                    row["duration_ms_total"] += int(duration_ms)
+                    row["duration_runs"] += 1
+                    if row["last_duration_ms"] is None:
+                        row["last_duration_ms"] = int(duration_ms)
                 row["fetched_total"] += int(source.get("fetched") or 0)
                 if source.get("ok"):
                     row["successes"] += 1
@@ -899,6 +1069,11 @@ class Storage:
         for row in sources.values():
             row["success_rate"] = row["successes"] / row["runs"] if row["runs"] else 0
             row["avg_fetched"] = row["fetched_total"] / row["runs"] if row["runs"] else 0
+            row["avg_duration_ms"] = (
+                int(row["duration_ms_total"] / row["duration_runs"]) if row["duration_runs"] else None
+            )
+            row.pop("duration_ms_total", None)
+            row.pop("duration_runs", None)
         ordered = sorted(sources.values(), key=lambda item: (item["success_rate"], -item["failures"], item["name"]))
         return {"runs": history, "sources": ordered, "run_count": len(history)}
 
@@ -1023,6 +1198,7 @@ class Storage:
             item.fetched_at.isoformat(),
             item.score,
             1 if item.featured else 0,
+            1 if item.featured else 0,
             json.dumps(item.tags, ensure_ascii=False),
             item.source_tier,
             item.reason,
@@ -1038,10 +1214,15 @@ class Storage:
         data = dict(row)
         data.pop("source_rank", None)
         data["featured"] = bool(data["featured"])
+        if "featured_candidate" in data:
+            data["featured_candidate"] = bool(data["featured_candidate"])
         data["tags"] = json.loads(data["tags"] or "[]")
         data["score_breakdown"] = json.loads(data.get("score_breakdown") or "{}")
+        raw = json.loads(data.get("raw") or "{}")
+        engagement = raw.get("engagement") if isinstance(raw, dict) else None
+        data["engagement"] = engagement if isinstance(engagement, dict) else None
         if include_raw:
-            data["raw"] = json.loads(data["raw"] or "{}")
+            data["raw"] = raw
         else:
             data.pop("raw", None)
         return data
@@ -1073,10 +1254,12 @@ class Storage:
         return sections
 
     @staticmethod
-    def _ensure_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+    def _ensure_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> bool:
         columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
         if column not in columns:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+            return True
+        return False
 
     @staticmethod
     def _append_channel_clause(clauses: list[str], params: list[Any], channel: str | None) -> None:
@@ -1114,12 +1297,56 @@ class Storage:
             existing_raw = json.loads(row["raw"] or "{}")
         except (KeyError, TypeError, json.JSONDecodeError):
             return item
-        llm = existing_raw.get("llm") if isinstance(existing_raw, dict) else None
-        if not llm:
+        if not isinstance(existing_raw, dict):
             return item
         raw = dict(item.raw or {})
-        raw.setdefault("llm", llm)
+        merged = False
+        for key in ("llm", "llm_triage"):
+            value = existing_raw.get(key)
+            if value and not raw.get(key):
+                raw[key] = value
+                merged = True
+        if not merged:
+            return item
         return replace(item, raw=raw)
+
+    @staticmethod
+    def _apply_stored_triage(item: NewsItem) -> NewsItem:
+        triage = (item.raw or {}).get("llm_triage")
+        if not isinstance(triage, dict):
+            return item
+        score, featured, reason, cluster_key, cluster_title = apply_llm_triage(
+            score=item.score,
+            featured=item.featured,
+            reason=item.reason,
+            cluster_key=item.cluster_key,
+            cluster_title=item.cluster_title,
+            triage=triage,
+        )
+        if (score, featured, reason, cluster_key, cluster_title) == (
+            item.score,
+            item.featured,
+            item.reason,
+            item.cluster_key,
+            item.cluster_title,
+        ):
+            return item
+        return replace(
+            item,
+            score=score,
+            featured=featured,
+            reason=reason,
+            cluster_key=cluster_key,
+            cluster_title=cluster_title,
+        )
+
+    @staticmethod
+    def _search_row_changed(row: sqlite3.Row, item: NewsItem) -> bool:
+        return (
+            row["title"] != item.title
+            or row["summary"] != item.summary
+            or row["tags"] != json.dumps(item.tags, ensure_ascii=False)
+        )
 
     @staticmethod
     def _row_changed(row: sqlite3.Row, item: NewsItem) -> bool:
@@ -1129,7 +1356,7 @@ class Storage:
             "url": item.url,
             "published_at": item.published_at.isoformat(),
             "score": item.score,
-            "featured": 1 if item.featured else 0,
+            "featured_candidate": 1 if item.featured else 0,
             "tags": json.dumps(item.tags, ensure_ascii=False),
             "source_tier": item.source_tier,
             "reason": item.reason,

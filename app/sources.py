@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import html
 import os
+import random
 import re
 import time
 from dataclasses import dataclass
@@ -18,12 +19,14 @@ import httpx
 import yaml
 from dateutil.parser import parse as parse_date
 
+from . import vocab
 from .models import NewsItem
 from .scoring import (
     UNSAFE_OR_LOW_VALUE,
     extract_tags,
     has_social_news_signal,
     has_strong_social_news_signal,
+    is_beginner_or_course_marketing_text,
     is_low_value_bilibili_text,
     is_low_value_social_text,
     is_low_value_x_text,
@@ -40,6 +43,10 @@ class SourceFetchError(RuntimeError):
 
 
 X_BROWSER_LOCK = asyncio.Lock()
+
+RETRYABLE_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
+GITHUB_SEARCH_SPACING_SECONDS = 2.0
+RATE_LIMIT_MAX_WAIT_SECONDS = 90.0
 
 BILIBILI_WBI_MIXIN_KEY_TABLE = [
     46,
@@ -108,6 +115,41 @@ BILIBILI_WBI_MIXIN_KEY_TABLE = [
     52,
 ]
 
+BILIBILI_TERMINOLOGY = (
+    "ComfyUI",
+    "Flux",
+    "Wan",
+    "Qwen",
+    "QwenVL",
+    "Qwen Image",
+    "Hunyuan",
+    "LTX",
+    "LTX-Video",
+    "Ideogram",
+    "LoRA",
+    "GGUF",
+    "FP8",
+    "NF4",
+    "ControlNet",
+    "IP-Adapter",
+    "Diffusers",
+    "Stable Diffusion",
+    "SDXL",
+    "SD3",
+    "checkpoint",
+    "safetensors",
+    "custom node",
+    "workflow",
+)
+BILIBILI_TERMINOLOGY = tuple(dict.fromkeys((*BILIBILI_TERMINOLOGY, *vocab.MODEL_FAMILY_TERMS)))
+
+# The card endpoint risk-controls non-browser user agents (-352) while the
+# search/view endpoints tolerate them, so follower lookups use a browser UA.
+BILIBILI_BROWSER_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+)
+
 X_EXTRACT_ARTICLES_JS = r"""
 () => {
   const out = [];
@@ -170,17 +212,101 @@ def env_csv(value: str | None) -> set[str]:
     return {part.strip().lower().lstrip("@") for part in re.split(r"[,;\s]+", value) if part.strip()}
 
 
+def is_github_search_url(url: str) -> bool:
+    parts = urlsplit(url)
+    return (parts.hostname or "").lower() == "api.github.com" and parts.path.startswith("/search/")
+
+
+def is_retryable_response(response: httpx.Response) -> bool:
+    return response.status_code in RETRYABLE_STATUS_CODES or is_github_rate_limited(response)
+
+
+def is_github_rate_limited(response: httpx.Response) -> bool:
+    if response.status_code != 403:
+        return False
+    if (response.request.url.host or "").lower() != "api.github.com":
+        return False
+    if response.headers.get("x-ratelimit-remaining") == "0":
+        return True
+    try:
+        return "rate limit" in response.text.lower()
+    except Exception:
+        return False
+
+
+def retry_wait_seconds(response: httpx.Response, *, default: float) -> float:
+    retry_after = response.headers.get("retry-after")
+    if retry_after:
+        try:
+            return min(max(float(retry_after), 0.0), RATE_LIMIT_MAX_WAIT_SECONDS)
+        except ValueError:
+            pass
+    reset = response.headers.get("x-ratelimit-reset")
+    if reset:
+        try:
+            wait = float(reset) - time.time()
+            if wait > 0:
+                return min(wait + 1.0, RATE_LIMIT_MAX_WAIT_SECONDS)
+        except ValueError:
+            pass
+    return min(default, RATE_LIMIT_MAX_WAIT_SECONDS)
+
+
 class Fetcher:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        bilibili_known_urls: set[str] | None = None,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
         headers = {"User-Agent": settings.user_agent}
         self.client = httpx.AsyncClient(
             headers=headers,
             timeout=settings.request_timeout,
             follow_redirects=True,
+            transport=transport,
         )
+        self.bilibili_known_urls = bilibili_known_urls or set()
+        # GitHub search has strict secondary rate limits; serialize those requests per collect run.
+        self._github_search_gate = asyncio.Semaphore(1)
+        self._bilibili_follower_cache: dict[int, int] = {}
 
     async def close(self) -> None:
         await self.client.aclose()
+
+    async def _get(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        params: dict[str, Any] | None = None,
+        ok_statuses: set[int] | frozenset[int] = frozenset(),
+    ) -> httpx.Response:
+        attempts = max(1, settings.http_retry_attempts)
+        delay = 1.5
+        for attempt in range(attempts):
+            try:
+                if is_github_search_url(url):
+                    async with self._github_search_gate:
+                        response = await self.client.get(url, headers=headers, params=params)
+                        await asyncio.sleep(GITHUB_SEARCH_SPACING_SECONDS)
+                else:
+                    response = await self.client.get(url, headers=headers, params=params)
+            except httpx.TransportError:
+                if attempt >= attempts - 1:
+                    raise
+                await asyncio.sleep(delay + random.uniform(0, 0.5))
+                delay *= 2
+                continue
+            if response.status_code in ok_statuses:
+                return response
+            if attempt < attempts - 1 and is_retryable_response(response):
+                await asyncio.sleep(retry_wait_seconds(response, default=delay) + random.uniform(0, 0.5))
+                delay *= 2
+                continue
+            response.raise_for_status()
+            return response
+        raise SourceFetchError(f"request to {url} failed after {attempts} attempts")
 
     async def fetch_source(self, source: Source, keywords: dict[str, list[str]]) -> list[NewsItem]:
         try:
@@ -211,13 +337,11 @@ class Fetcher:
         raise SourceFetchError(f"{source.id}: unsupported source type {source.type}")
 
     async def _get_json(self, url: str) -> Any:
-        response = await self.client.get(url, headers=self._headers_for(url))
-        response.raise_for_status()
+        response = await self._get(url, headers=self._headers_for(url))
         return response.json()
 
     async def _get_text(self, url: str) -> str:
-        response = await self.client.get(url, headers=self._headers_for(url))
-        response.raise_for_status()
+        response = await self._get(url, headers=self._headers_for(url))
         return response.text
 
     def _headers_for(self, url: str) -> dict[str, str]:
@@ -344,55 +468,6 @@ class Fetcher:
                 items.append(item)
         return items
 
-    async def _fetch_bilibili_search(self, source: Source, keywords: dict[str, list[str]]) -> list[NewsItem]:
-        query = parse_source_query(source.url)
-        if not query:
-            query = "ComfyUI 新模型 OR ComfyUI 节点"
-        params = urlencode(
-            {
-                "search_type": "video",
-                "keyword": query,
-                "order": "pubdate",
-                "page": "1",
-            },
-            quote_via=quote,
-        )
-        headers = {
-            "Referer": f"https://search.bilibili.com/all?keyword={quote(query)}",
-            "User-Agent": settings.user_agent,
-        }
-        if settings.bilibili_cookie:
-            headers["Cookie"] = settings.bilibili_cookie
-        response = await self.client.get(
-            f"https://api.bilibili.com/x/web-interface/search/type?{params}",
-            headers=headers,
-        )
-        response.raise_for_status()
-        payload = response.json()
-        if payload.get("code") != 0:
-            raise SourceFetchError(f"bilibili search returned code {payload.get('code')}: {payload.get('message')}")
-        items = []
-        for video in (payload.get("data") or {}).get("result", [])[:30]:
-            title = clean_html(video.get("title") or "Bilibili video")
-            summary = clean_html(video.get("description") or "")
-            bvid = video.get("bvid")
-            arcurl = video.get("arcurl")
-            url = arcurl or (f"https://www.bilibili.com/video/{bvid}" if bvid else source.url)
-            pubdate = parse_unix_datetime(video.get("pubdate"))
-            item = build_item(
-                source=source,
-                title=title,
-                summary=summary,
-                url=url,
-                published_at=pubdate,
-                keywords=keywords,
-                author=video.get("author"),
-                raw=video,
-            )
-            if item:
-                items.append(item)
-        return items
-
     async def _fetch_bilibili_search_v2(self, source: Source, keywords: dict[str, list[str]]) -> list[NewsItem]:
         query = parse_source_query(source.url) or "ComfyUI 新模型 OR ComfyUI 节点"
         headers = {
@@ -401,53 +476,93 @@ class Fetcher:
         }
         if settings.bilibili_cookie:
             headers["Cookie"] = settings.bilibili_cookie
-        await self.client.get("https://www.bilibili.com", headers=headers)
+        await self._get("https://www.bilibili.com", headers=headers)
         items: list[NewsItem] = []
         seen: set[str] = set()
         wbi_key = await self._bilibili_wbi_key(headers)
+        asr_budget = max(0, settings.bilibili_asr_max_items)
+        enrich_gate = asyncio.Semaphore(max(1, settings.bilibili_enrich_concurrency))
         for term in bilibili_search_terms(query):
             term_headers = {**headers, "Referer": f"https://search.bilibili.com/all?keyword={quote(term)}"}
-            params = bilibili_signed_search_params(term, wbi_key)
-            response = await self.client.get(
-                "https://api.bilibili.com/x/web-interface/wbi/search/type",
+            payload = await self._bilibili_search_payload(term, term_headers, wbi_key)
+            videos = (payload.get("data") or {}).get("result", [])[:30]
+            if settings.bilibili_asr_enabled:
+                # The ASR budget is consumed in order; keep the sequential path when ASR is on.
+                for video in videos:
+                    item, used_asr = await self._bilibili_video_to_item(
+                        source,
+                        video,
+                        keywords,
+                        seen,
+                        headers=term_headers,
+                        wbi_key=wbi_key,
+                        asr_budget=asr_budget,
+                    )
+                    if used_asr:
+                        asr_budget = max(0, asr_budget - 1)
+                    if item:
+                        items.append(item)
+                continue
+
+            async def convert(video: dict[str, Any]) -> NewsItem | None:
+                async with enrich_gate:
+                    item, _ = await self._bilibili_video_to_item(
+                        source,
+                        video,
+                        keywords,
+                        seen,
+                        headers=term_headers,
+                        wbi_key=wbi_key,
+                        asr_budget=0,
+                    )
+                    return item
+
+            converted = await asyncio.gather(*(convert(video) for video in videos))
+            items.extend(item for item in converted if item)
+        return sorted(items, key=lambda item: item.published_at, reverse=True)[:120]
+
+    async def _bilibili_search_payload(
+        self,
+        term: str,
+        term_headers: dict[str, str],
+        wbi_key: str | None,
+    ) -> dict[str, Any]:
+        params = bilibili_signed_search_params(term, wbi_key)
+        legacy_params = {key: value for key, value in params.items() if key not in {"w_rid", "wts"}}
+        response = await self._get(
+            "https://api.bilibili.com/x/web-interface/wbi/search/type",
+            headers=term_headers,
+            params=params,
+            ok_statuses={404},
+        )
+        if response.status_code == 404:
+            response = await self._get(
+                "https://api.bilibili.com/x/web-interface/search/type",
                 headers=term_headers,
-                params=params,
+                params=legacy_params,
             )
-            if response.status_code == 404:
-                response = await self.client.get(
+        payload = response.json()
+        result_rows = (payload.get("data") or {}).get("result") or []
+        if (payload.get("code") != 0 and wbi_key) or (payload.get("code") == 0 and not result_rows):
+            try:
+                response = await self._get(
                     "https://api.bilibili.com/x/web-interface/search/type",
                     headers=term_headers,
-                    params={key: value for key, value in params.items() if key not in {"w_rid", "wts"}},
+                    params=legacy_params,
                 )
-            response.raise_for_status()
-            payload = response.json()
-            result_rows = (payload.get("data") or {}).get("result") or []
-            if (payload.get("code") != 0 and wbi_key) or (payload.get("code") == 0 and not result_rows):
-                try:
-                    response = await self.client.get(
-                        "https://api.bilibili.com/x/web-interface/search/type",
-                        headers=term_headers,
-                        params={key: value for key, value in params.items() if key not in {"w_rid", "wts"}},
-                    )
-                    response.raise_for_status()
-                    fallback_payload = response.json()
-                    if fallback_payload.get("code") == 0 or payload.get("code") != 0:
-                        payload = fallback_payload
-                except httpx.HTTPError:
-                    if payload.get("code") != 0:
-                        raise
-            if payload.get("code") != 0:
-                raise SourceFetchError(f"bilibili search returned code {payload.get('code')}: {payload.get('message')}")
-            for video in (payload.get("data") or {}).get("result", [])[:30]:
-                item = self._bilibili_video_to_item(source, video, keywords, seen)
-                if item:
-                    items.append(item)
-        return sorted(items, key=lambda item: item.published_at, reverse=True)[:120]
+                fallback_payload = response.json()
+                if fallback_payload.get("code") == 0 or payload.get("code") != 0:
+                    payload = fallback_payload
+            except httpx.HTTPError:
+                if payload.get("code") != 0:
+                    raise
+        if payload.get("code") != 0:
+            raise SourceFetchError(f"bilibili search returned code {payload.get('code')}: {payload.get('message')}")
+        return payload
 
     async def _bilibili_wbi_key(self, headers: dict[str, str]) -> str | None:
         try:
-            response = await self.client.get("https://api.bilibili.com/x/web-interface/nav", headers=headers)
-            response.raise_for_status()
+            response = await self._get("https://api.bilibili.com/x/web-interface/nav", headers=headers)
             data = response.json().get("data") or {}
             wbi_img = data.get("wbi_img") or {}
             img_key = Path(urlsplit(wbi_img.get("img_url") or "").path).stem
@@ -459,94 +574,225 @@ class Fetcher:
         except Exception:
             return None
 
-    def _bilibili_video_to_item(
+    async def _bilibili_video_detail(self, bvid: str, headers: dict[str, str]) -> dict[str, Any]:
+        if not bvid:
+            return {}
+        try:
+            response = await self._get(
+                "https://api.bilibili.com/x/web-interface/view",
+                headers=headers,
+                params={"bvid": bvid},
+            )
+            payload = response.json()
+            if payload.get("code") != 0:
+                return {}
+            data = payload.get("data")
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    async def _bilibili_author_followers(self, mid: Any, headers: dict[str, str]) -> int:
+        author_mid = int_or_none(mid)
+        if not author_mid:
+            return 0
+        cached = self._bilibili_follower_cache.get(author_mid)
+        if cached is not None:
+            return cached
+        followers = 0
+        try:
+            response = await self._get(
+                "https://api.bilibili.com/x/web-interface/card",
+                headers={**headers, "User-Agent": BILIBILI_BROWSER_UA},
+                params={"mid": str(author_mid)},
+            )
+            payload = response.json()
+            if payload.get("code") == 0:
+                data = payload.get("data") or {}
+                card = data.get("card") if isinstance(data.get("card"), dict) else {}
+                followers = max(0, int(data.get("follower") or card.get("fans") or 0))
+        except Exception:
+            followers = 0
+        self._bilibili_follower_cache[author_mid] = followers
+        return followers
+
+    async def _bilibili_player_context(
+        self,
+        bvid: str,
+        cid: int | None,
+        headers: dict[str, str],
+        wbi_key: str | None,
+    ) -> dict[str, Any]:
+        if not bvid or not cid:
+            return {}
+        try:
+            response = await self._get(
+                "https://api.bilibili.com/x/player/wbi/v2",
+                headers=headers,
+                params=bilibili_signed_params({"bvid": bvid, "cid": str(cid)}, wbi_key),
+            )
+            payload = response.json()
+            if payload.get("code") != 0:
+                return {}
+            data = payload.get("data")
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    async def _bilibili_subtitle_text(self, player: dict[str, Any], headers: dict[str, str]) -> str:
+        if not settings.bilibili_subtitle_text_enabled:
+            return ""
+        subtitles = bilibili_subtitle_rows(player)
+        if not subtitles:
+            return ""
+        url = str(subtitles[0].get("subtitle_url") or subtitles[0].get("url") or "")
+        if not url:
+            return ""
+        if url.startswith("//"):
+            url = f"https:{url}"
+        try:
+            response = await self._get(url, headers=headers)
+            payload = response.json()
+            body = payload.get("body") if isinstance(payload, dict) else None
+            if not isinstance(body, list):
+                return ""
+            lines = []
+            for row in body:
+                if isinstance(row, dict):
+                    content = clean_html(str(row.get("content") or ""))
+                    if content:
+                        lines.append(content)
+                if sum(len(line) for line in lines) >= settings.bilibili_subtitle_max_chars:
+                    break
+            return summarize(" ".join(lines), limit=settings.bilibili_subtitle_max_chars)
+        except Exception:
+            return ""
+
+    async def _bilibili_asr_context(
+        self,
+        *,
+        url: str,
+        bvid: str,
+        title: str,
+        understanding: dict[str, Any],
+        engagement: dict[str, int],
+        asr_budget: int,
+    ) -> tuple[dict[str, Any] | None, bool]:
+        if not settings.bilibili_asr_enabled or asr_budget <= 0:
+            return None, False
+        if not settings.bilibili_asr_command:
+            return {"status": "skipped", "reason": "BILIBILI_ASR_COMMAND not set"}, False
+        text = f"{title} {understanding.get('term_context') or ''} {understanding.get('summary') or ''}".lower()
+        if not bilibili_should_use_asr(text, engagement):
+            return None, False
+        env = dict(os.environ)
+        env.update(
+            {
+                "BILIBILI_VIDEO_URL": url,
+                "BILIBILI_BVID": bvid,
+                "BILIBILI_TITLE": title,
+                "BILIBILI_TERMS": ", ".join(understanding.get("terms") or []),
+            }
+        )
+        try:
+            process = await asyncio.create_subprocess_shell(
+                settings.bilibili_asr_command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=env,
+            )
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(),
+                timeout=settings.bilibili_asr_timeout_seconds,
+            )
+        except Exception as exc:
+            return {"status": "error", "reason": str(exc)}, True
+        stdout_text = stdout.decode("utf-8", errors="replace").strip()
+        stderr_text = stderr.decode("utf-8", errors="replace").strip()
+        if process.returncode != 0:
+            return {
+                "status": "error",
+                "returncode": process.returncode,
+                "stderr": summarize(stderr_text, limit=600),
+            }, True
+        return {"status": "ok", "text": summarize(stdout_text, limit=2400)}, True
+
+    async def _bilibili_video_to_item(
         self,
         source: Source,
         video: dict[str, Any],
         keywords: dict[str, list[str]],
         seen: set[str],
-    ) -> NewsItem | None:
+        *,
+        headers: dict[str, str],
+        wbi_key: str | None,
+        asr_budget: int,
+    ) -> tuple[NewsItem | None, bool]:
         title = clean_html(video.get("title") or "Bilibili video")
-        summary = clean_html(video.get("description") or "")
         bvid = video.get("bvid")
         arcurl = video.get("arcurl")
         url = arcurl or (f"https://www.bilibili.com/video/{bvid}" if bvid else source.url)
         if url in seen:
-            return None
+            return None, False
         seen.add(url)
-        play = int(video.get("play") or 0)
-        favorites = int(video.get("favorites") or 0)
-        review = int(video.get("review") or 0)
-        interaction_count = play // 100 + favorites * 3 + review * 2
+        if should_skip_bilibili_enrichment(url, video.get("pubdate"), self.bilibili_known_urls):
+            return None, False
+        detail = await self._bilibili_video_detail(str(bvid), headers) if settings.bilibili_detail_enabled and bvid else {}
+        cid = bilibili_primary_cid(video, detail)
+        player = await self._bilibili_player_context(str(bvid), cid, headers, wbi_key) if cid else {}
+        subtitle_text = await self._bilibili_subtitle_text(player, headers)
+        engagement = bilibili_engagement(video, detail)
+        understanding = bilibili_content_understanding(video, detail, player, subtitle_text)
+        asr_context, used_asr = await self._bilibili_asr_context(
+            url=url,
+            bvid=str(bvid or ""),
+            title=title,
+            understanding=understanding,
+            engagement=engagement,
+            asr_budget=asr_budget,
+        )
+        if asr_context:
+            understanding["asr"] = asr_context
+            asr_text = clean_html(str(asr_context.get("text") or ""))
+            if asr_text:
+                understanding["summary"] = summarize(
+                    f"{understanding.get('summary') or ''} ASR: {asr_text}",
+                    limit=1800,
+                )
+                understanding["terms"] = bilibili_terms_from_text(
+                    f"{understanding.get('term_context') or ''} {asr_text}"
+                )
+        summary = str(understanding.get("summary") or clean_html(video.get("description") or ""))
         author = video.get("author")
+        owner = detail.get("owner") if isinstance(detail, dict) else None
+        if isinstance(owner, dict):
+            author = author or owner.get("name")
+        author_mid = (owner or {}).get("mid") if isinstance(owner, dict) else None
+        author_mid = author_mid or video.get("mid")
+        followers = await self._bilibili_author_followers(author_mid, headers) if author_mid else 0
+        engagement = {**engagement, "author_followers": followers}
         trusted_author = author_is_allowlisted(author, settings.bilibili_author_allowlist)
         raw = {
             **video,
-            "engagement": {
-                "views": play,
-                "favorites": favorites,
-                "comments": review,
-                "weighted": interaction_count,
-            },
+            "bilibili_detail": detail,
+            "bilibili_player": player,
+            "content_understanding": understanding,
+            "engagement": engagement,
             "trusted_author": trusted_author,
         }
-        return build_item(
+        item = build_item(
             source=source,
             title=title,
             summary=summary,
             url=url,
-            published_at=parse_unix_datetime(video.get("pubdate")),
+            published_at=parse_unix_datetime(detail.get("pubdate") or video.get("pubdate")),
             keywords=keywords,
             author=author,
             raw=raw,
-            interaction_count=interaction_count,
+            interaction_count=engagement.get("weighted"),
             trusted_author=trusted_author,
+            author_followers=followers,
         )
-
-    async def _fetch_bilibili_search_v3(self, source: Source, keywords: dict[str, list[str]]) -> list[NewsItem]:
-        query = parse_source_query(source.url) or "ComfyUI 新模型 OR ComfyUI 节点"
-        headers = {
-            "Referer": "https://search.bilibili.com/",
-            "User-Agent": settings.user_agent,
-        }
-        if settings.bilibili_cookie:
-            headers["Cookie"] = settings.bilibili_cookie
-        await self.client.get("https://www.bilibili.com", headers=headers)
-        wbi_key = await self._bilibili_wbi_key(headers)
-        items: list[NewsItem] = []
-        seen: set[str] = set()
-        for term in bilibili_search_terms(query):
-            params = bilibili_signed_search_params(term, wbi_key)
-            term_headers = {**headers, "Referer": f"https://search.bilibili.com/all?keyword={quote(term)}"}
-            response = await self.client.get(
-                "https://api.bilibili.com/x/web-interface/wbi/search/type",
-                headers=term_headers,
-                params=params,
-            )
-            response.raise_for_status()
-            payload = response.json()
-            result_rows = (payload.get("data") or {}).get("result") or []
-            if (payload.get("code") != 0 and wbi_key) or (payload.get("code") == 0 and not result_rows):
-                try:
-                    response = await self.client.get(
-                        "https://api.bilibili.com/x/web-interface/search/type",
-                        headers=term_headers,
-                        params={key: value for key, value in params.items() if key not in {"w_rid", "wts"}},
-                    )
-                    response.raise_for_status()
-                    fallback_payload = response.json()
-                    if fallback_payload.get("code") == 0 or payload.get("code") != 0:
-                        payload = fallback_payload
-                except httpx.HTTPError:
-                    if payload.get("code") != 0:
-                        raise
-            if payload.get("code") != 0:
-                raise SourceFetchError(f"bilibili search returned code {payload.get('code')}: {payload.get('message')}")
-            for video in (payload.get("data") or {}).get("result", [])[:30]:
-                item = self._bilibili_video_to_item(source, video, keywords, seen)
-                if item:
-                    items.append(item)
-        return sorted(items, key=lambda item: item.published_at, reverse=True)[:120]
+        return item, used_asr
 
     async def _fetch_x_search(self, source: Source, keywords: dict[str, list[str]]) -> list[NewsItem]:
         if settings.x_bearer_token:
@@ -556,96 +802,111 @@ class Fetcher:
         raise SourceFetchError(f"{source.id}: requires X_BEARER_TOKEN or running X browser debug endpoint")
 
     async def _fetch_huggingface_models(self, source: Source, keywords: dict[str, list[str]]) -> list[NewsItem]:
-        query = parse_source_query(source.url) or "ComfyUI"
-        params = {
-            "search": query,
-            "sort": "lastModified",
-            "direction": "-1",
-            "limit": "30",
-            "full": "true",
-        }
-        response = await self.client.get("https://huggingface.co/api/models", params=params)
-        response.raise_for_status()
         items: list[NewsItem] = []
-        for model in response.json()[:30]:
-            if not isinstance(model, dict):
-                continue
-            model_id = model.get("modelId") or model.get("id") or ""
-            if not model_id:
-                continue
-            tags = model.get("tags") or []
-            downloads = int(model.get("downloads") or 0)
-            likes = int(model.get("likes") or 0)
-            summary = huggingface_model_summary(model, downloads=downloads, likes=likes)
-            item = build_item(
-                source=source,
-                title=f"Hugging Face model: {model_id}",
-                summary=summary,
-                url=f"https://huggingface.co/{model_id}",
-                published_at=parse_datetime(model.get("lastModified") or model.get("createdAt")),
-                keywords=keywords,
-                author=str(model_id).split("/")[0],
-                raw={
-                    **model,
-                    "engagement": {"downloads": downloads, "likes": likes, "weighted": downloads // 50 + likes * 2},
-                },
-                interaction_count=downloads // 50 + likes * 2,
-            )
-            if item:
-                items.append(item)
-        return items
+        seen: set[str] = set()
+        queries = model_discovery_queries(parse_source_query(source.url), default="ComfyUI")
+
+        async def fetch_query(query: str) -> tuple[str, list[Any]]:
+            params = {
+                "search": query,
+                "sort": "lastModified",
+                "direction": "-1",
+                "limit": "30",
+                "full": "true",
+            }
+            response = await self._get("https://huggingface.co/api/models", params=params)
+            return query, response.json()[:30]
+
+        for query, models in await asyncio.gather(*(fetch_query(query) for query in queries)):
+            for model in models:
+                if not isinstance(model, dict):
+                    continue
+                model_id = model.get("modelId") or model.get("id") or ""
+                if not model_id or model_id in seen:
+                    continue
+                seen.add(model_id)
+                downloads = int(model.get("downloads") or 0)
+                likes = int(model.get("likes") or 0)
+                summary = huggingface_model_summary(model, downloads=downloads, likes=likes)
+                item = build_item(
+                    source=source,
+                    title=f"Hugging Face model: {model_id}",
+                    summary=summary,
+                    url=f"https://huggingface.co/{model_id}",
+                    published_at=parse_datetime(model.get("lastModified") or model.get("createdAt")),
+                    keywords=keywords,
+                    author=str(model_id).split("/")[0],
+                    raw={
+                        **model,
+                        "discovery_query": query,
+                        "engagement": {"downloads": downloads, "likes": likes, "weighted": downloads // 50 + likes * 2},
+                    },
+                    interaction_count=downloads // 50 + likes * 2,
+                )
+                if item:
+                    items.append(item)
+        return sorted(items, key=lambda item: item.published_at, reverse=True)[:90]
 
     async def _fetch_civitai_models(self, source: Source, keywords: dict[str, list[str]]) -> list[NewsItem]:
-        query = parse_source_query(source.url) or "ComfyUI"
-        params = {
-            "query": query,
-            "sort": "Newest",
-            "period": "Month",
-            "limit": "50",
-        }
-        response = await self.client.get(
-            "https://civitai.com/api/v1/models",
-            params=params,
-            headers=self._headers_for("https://civitai.com/api/v1/models"),
-        )
-        response.raise_for_status()
-        payload = response.json()
         items: list[NewsItem] = []
-        for model in (payload.get("items") or [])[:40]:
-            if not isinstance(model, dict):
-                continue
-            title = model.get("name") or "Civitai model"
-            creator = (model.get("creator") or {}).get("username")
-            stats = model.get("stats") or {}
-            versions = model.get("modelVersions") or []
-            latest_version = versions[0] if versions and isinstance(versions[0], dict) else {}
-            interaction_count = (
-                int(stats.get("downloadCount") or 0) // 20
-                + int(stats.get("thumbsUpCount") or 0) * 2
-                + int(stats.get("commentCount") or 0) * 2
+        seen: set[str] = set()
+        queries = model_discovery_queries(parse_source_query(source.url), default="ComfyUI")
+
+        async def fetch_query(query: str) -> tuple[str, list[Any]]:
+            params = {
+                "query": query,
+                "sort": "Newest",
+                "period": "Month",
+                "limit": "50",
+            }
+            response = await self._get(
+                "https://civitai.com/api/v1/models",
+                params=params,
+                headers=self._headers_for("https://civitai.com/api/v1/models"),
             )
-            item = build_item(
-                source=source,
-                title=f"Civitai model: {title}",
-                summary=clean_html(
-                    f"{model.get('description') or ''} Type: {model.get('type') or 'model'}. "
-                    f"Latest version: {latest_version.get('name') or ''}."
-                ),
-                url=f"https://civitai.com/models/{model.get('id')}",
-                published_at=parse_datetime(
-                    latest_version.get("publishedAt")
-                    or latest_version.get("createdAt")
-                    or model.get("publishedAt")
-                    or model.get("createdAt")
-                ),
-                keywords=keywords,
-                author=creator,
-                raw={**model, "engagement": {**stats, "weighted": interaction_count}},
-                interaction_count=interaction_count,
-            )
-            if item:
-                items.append(item)
-        return items
+            payload = response.json()
+            return query, (payload.get("items") or [])[:40]
+
+        for query, models in await asyncio.gather(*(fetch_query(query) for query in queries)):
+            for model in models:
+                if not isinstance(model, dict):
+                    continue
+                model_id = str(model.get("id") or "")
+                if not model_id or model_id in seen:
+                    continue
+                seen.add(model_id)
+                title = model.get("name") or "Civitai model"
+                creator = (model.get("creator") or {}).get("username")
+                stats = model.get("stats") or {}
+                versions = model.get("modelVersions") or []
+                latest_version = versions[0] if versions and isinstance(versions[0], dict) else {}
+                interaction_count = (
+                    int(stats.get("downloadCount") or 0) // 20
+                    + int(stats.get("thumbsUpCount") or 0) * 2
+                    + int(stats.get("commentCount") or 0) * 2
+                )
+                item = build_item(
+                    source=source,
+                    title=f"Civitai model: {title}",
+                    summary=clean_html(
+                        f"{model.get('description') or ''} Type: {model.get('type') or 'model'}. "
+                        f"Latest version: {latest_version.get('name') or ''}."
+                    ),
+                    url=f"https://civitai.com/models/{model.get('id')}",
+                    published_at=parse_datetime(
+                        latest_version.get("publishedAt")
+                        or latest_version.get("createdAt")
+                        or model.get("publishedAt")
+                        or model.get("createdAt")
+                    ),
+                    keywords=keywords,
+                    author=creator,
+                    raw={**model, "discovery_query": query, "engagement": {**stats, "weighted": interaction_count}},
+                    interaction_count=interaction_count,
+                )
+                if item:
+                    items.append(item)
+        return sorted(items, key=lambda item: item.published_at, reverse=True)[:120]
 
     async def _fetch_youtube_search(self, source: Source, keywords: dict[str, list[str]]) -> list[NewsItem]:
         query = parse_source_query(source.url) or "ComfyUI model workflow"
@@ -659,8 +920,7 @@ class Fetcher:
             "order": "date",
             "maxResults": "25",
         }
-        response = await self.client.get("https://www.googleapis.com/youtube/v3/search", params=search_params)
-        response.raise_for_status()
+        response = await self._get("https://www.googleapis.com/youtube/v3/search", params=search_params)
         payload = response.json()
         video_ids = [
             str((item.get("id") or {}).get("videoId"))
@@ -669,7 +929,7 @@ class Fetcher:
         ]
         stats_by_id: dict[str, dict[str, Any]] = {}
         if video_ids:
-            stats_response = await self.client.get(
+            stats_response = await self._get(
                 "https://www.googleapis.com/youtube/v3/videos",
                 params={
                     "key": settings.youtube_api_key,
@@ -677,12 +937,36 @@ class Fetcher:
                     "id": ",".join(video_ids),
                 },
             )
-            stats_response.raise_for_status()
             stats_by_id = {
                 item.get("id"): item.get("statistics") or {}
                 for item in stats_response.json().get("items", [])
                 if item.get("id")
             }
+        channel_ids = list(
+            dict.fromkeys(
+                str((row.get("snippet") or {}).get("channelId"))
+                for row in payload.get("items", [])
+                if (row.get("snippet") or {}).get("channelId")
+            )
+        )
+        subscribers_by_channel: dict[str, int] = {}
+        if channel_ids:
+            try:
+                channels_response = await self._get(
+                    "https://www.googleapis.com/youtube/v3/channels",
+                    params={
+                        "key": settings.youtube_api_key,
+                        "part": "statistics",
+                        "id": ",".join(channel_ids[:50]),
+                    },
+                )
+                subscribers_by_channel = {
+                    str(row.get("id")): int((row.get("statistics") or {}).get("subscriberCount") or 0)
+                    for row in channels_response.json().get("items", [])
+                    if row.get("id")
+                }
+            except Exception:
+                subscribers_by_channel = {}
         items: list[NewsItem] = []
         for row in payload.get("items", []):
             snippet = row.get("snippet") or {}
@@ -695,6 +979,7 @@ class Fetcher:
                 + int(stats.get("likeCount") or 0) * 2
                 + int(stats.get("commentCount") or 0) * 2
             )
+            followers = subscribers_by_channel.get(str(snippet.get("channelId") or ""), 0)
             item = build_item(
                 source=source,
                 title=f"YouTube: {clean_html(snippet.get('title') or 'ComfyUI video')}",
@@ -703,8 +988,13 @@ class Fetcher:
                 published_at=parse_datetime(snippet.get("publishedAt")),
                 keywords=keywords,
                 author=snippet.get("channelTitle"),
-                raw={**row, "statistics": stats, "engagement": {**stats, "weighted": interaction_count}},
+                raw={
+                    **row,
+                    "statistics": stats,
+                    "engagement": {**stats, "weighted": interaction_count, "author_followers": followers},
+                },
                 interaction_count=interaction_count,
+                author_followers=followers,
             )
             if item:
                 items.append(item)
@@ -715,8 +1005,7 @@ class Fetcher:
         if not feed_url:
             env_name = source_url_env_name(source.url) or "feed URL"
             raise SourceFetchError(f"{source.id}: requires {env_name}")
-        response = await self.client.get(feed_url, headers={**self._headers_for(feed_url), **json_feed_headers(source)})
-        response.raise_for_status()
+        response = await self._get(feed_url, headers={**self._headers_for(feed_url), **json_feed_headers(source)})
         payload = response.json()
         rows = json_feed_rows(payload)
         items: list[NewsItem] = []
@@ -755,14 +1044,13 @@ class Fetcher:
             "max_results": "25",
             "tweet.fields": "created_at,author_id,public_metrics",
             "expansions": "author_id",
-            "user.fields": "username,name",
+            "user.fields": "username,name,public_metrics",
         }
-        response = await self.client.get(
+        response = await self._get(
             "https://api.x.com/2/tweets/search/recent",
             params=params,
             headers=headers,
         )
-        response.raise_for_status()
         payload = response.json()
         users = {
             user["id"]: user
@@ -780,6 +1068,7 @@ class Fetcher:
             metrics = tweet.get("public_metrics") or {}
             interaction_count = x_interaction_count(metrics)
             trusted_author = author_is_allowlisted(username, settings.x_author_allowlist)
+            followers = x_author_followers(user)
             raw = {
                 **tweet,
                 "author": user,
@@ -789,6 +1078,7 @@ class Fetcher:
                     "replies": int(metrics.get("reply_count") or 0),
                     "quotes": int(metrics.get("quote_count") or 0),
                     "weighted": interaction_count,
+                    "author_followers": followers,
                 },
                 "trusted_author": trusted_author,
             }
@@ -803,6 +1093,7 @@ class Fetcher:
                 raw=raw,
                 interaction_count=interaction_count,
                 trusted_author=trusted_author,
+                author_followers=followers,
             )
             if item:
                 items.append(item)
@@ -913,6 +1204,7 @@ def build_item(
     github_stars: int | None = None,
     interaction_count: int | None = None,
     trusted_author: bool = False,
+    author_followers: int | None = None,
 ) -> NewsItem | None:
     title = normalize_text(title)
     summary = summarize(summary)
@@ -922,6 +1214,8 @@ def build_item(
         return None
     if is_low_value_t2_item(title, summary, source, raw):
         return None
+    if author_followers is None:
+        author_followers = author_followers_from_raw(raw)
 
     tags = extract_tags(title, summary, source.category)
     if source.category == "official":
@@ -936,6 +1230,10 @@ def build_item(
         github_stars=github_stars,
         interaction_count=interaction_count or interaction_count_from_raw(raw),
         trusted_author=trusted_author or bool((raw or {}).get("trusted_author")),
+        author=author,
+        source_id=source.id,
+        published_at=published_at,
+        author_followers=author_followers,
     )
     score = score_item(
         title=title,
@@ -947,6 +1245,10 @@ def build_item(
         github_stars=github_stars,
         interaction_count=interaction_count or interaction_count_from_raw(raw),
         trusted_author=trusted_author or bool((raw or {}).get("trusted_author")),
+        author=author,
+        source_id=source.id,
+        published_at=published_at,
+        author_followers=author_followers,
     )
     cluster_key = cluster_key_for(title, summary, url)
     reason = explain_item(
@@ -957,6 +1259,7 @@ def build_item(
         github_stars=github_stars,
         trusted_author=trusted_author or bool((raw or {}).get("trusted_author")),
         interaction_count=interaction_count or interaction_count_from_raw(raw),
+        author_followers=author_followers,
     )
     featured = is_featured_item(
         score=score,
@@ -1029,15 +1332,7 @@ def is_featured_item(
         "gguf",
         "fp8",
         "quant",
-        "flux",
-        "wan",
         "qwen",
-        "hunyuan",
-        "ltx",
-        "kontext",
-        "hidream",
-        "qwen image",
-        "qwen-image",
         "image model",
         "video model",
         "model support",
@@ -1047,6 +1342,7 @@ def is_featured_item(
         "节点",
         "视频模型",
         "图片模型",
+        *vocab.MODEL_FAMILY_TERMS,
     )
     low_churn_words = (
         "chore",
@@ -1257,13 +1553,36 @@ def is_low_value_t2_item(
     source: Source,
     raw: dict[str, Any] | None,
 ) -> bool:
-    text = f"{title} {summary}".lower()
+    extra_text = bilibili_content_text(raw) if source.type == "bilibili_search" else ""
+    text = f"{title} {summary} {extra_text}".lower()
     if any(word in text for word in UNSAFE_OR_LOW_VALUE):
+        return True
+    if source.id.endswith("open-model-discovery") and is_low_value_open_model_discovery_item(text, raw, source):
+        return True
+    if source.id.endswith("open-model-discovery") and not has_visual_open_model_signal(text):
+        return True
+    if source.type in {"huggingface_models", "civitai_models"} and is_low_value_model_platform_item(text, raw, source):
+        return True
+    if source.type in {"huggingface_models", "civitai_models"} and is_beginner_or_course_marketing_text(text):
+        return True
+    if source.category == "community" and source.type == "rss" and is_low_value_social_text(text):
+        return True
+    if source.type in {
+        "bilibili_search",
+        "x_search",
+        "youtube_search",
+        "youtube_rss",
+        "discord_feed",
+        "forum_json",
+        "json_feed",
+    } and is_beginner_or_course_marketing_text(text):
         return True
     if source.type == "x_search":
         return is_low_value_x_text(text) and not has_social_news_signal(text)
     if source.type == "bilibili_search":
-        return is_low_value_bilibili_text(text)
+        if is_low_value_bilibili_text(text):
+            return True
+        return is_low_value_bilibili_candidate(text, raw)
     if source.type == "youtube_search":
         return is_low_value_social_text(text) and not has_social_news_signal(text)
     if source.type in {"discord_feed", "forum_json", "json_feed"}:
@@ -1284,6 +1603,158 @@ def is_low_value_t2_item(
     if has_description_match and (has_signal_tag or stars >= 10):
         return False
     return True
+
+
+def is_low_value_bilibili_candidate(text: str, raw: dict[str, Any] | None) -> bool:
+    if has_social_news_signal(text) or has_visual_open_model_signal(text):
+        return False
+    specific_terms = (
+        "flux",
+        "wan",
+        "qwen",
+        "qwenvl",
+        "ltx",
+        "hunyuan",
+        "ideogram",
+        "lora",
+        "gguf",
+        "fp8",
+        "nf4",
+        "checkpoint",
+        "safetensors",
+        "custom node",
+        "workflow",
+        "diffusers",
+        "controlnet",
+        "ip-adapter",
+    )
+    has_specific_terms = any(term in text for term in specific_terms)
+    if has_specific_terms and (raw or {}).get("content_understanding"):
+        return False
+    engagement = interaction_count_from_raw(raw) or 0
+    semantic_terms = (
+        "model",
+        "node",
+        "nodes",
+        "workflow",
+        "checkpoint",
+        "release",
+        "update",
+        "adapter",
+        "plugin",
+        "custom node",
+    )
+    if "comfyui" in text and engagement >= 250 and any(term in text for term in semantic_terms):
+        return False
+    return True
+
+
+def is_low_value_model_platform_item(text: str, raw: dict[str, Any] | None, source: Source) -> bool:
+    low_value_terms = (
+        "prompt builder",
+        "prompt generator",
+        "prompt helper",
+        "prompt assistant",
+        "ai prompt generator",
+        "ai generation for sd",
+        "wildcard pack",
+        "wildcards",
+        "negative prompt",
+    )
+    return any(term in text for term in low_value_terms)
+
+
+def is_low_value_open_model_discovery_item(text: str, raw: dict[str, Any] | None, source: Source) -> bool:
+    raw = raw or {}
+    if source.id == "civitai-open-model-discovery":
+        low_value_terms = (
+            "patreon",
+            "discord.gg",
+            "early access",
+            "character ",
+            "character)",
+            "cosplay",
+            "alternate_costume",
+            "recommended weight",
+            "pony",
+            "illustrious",
+            "noobai",
+            "anime",
+            "arknights",
+            "style ",
+            "style lora",
+        )
+        high_value_terms = (
+            "comfyui",
+            "text-to-video",
+            "image-to-video",
+            "video model",
+            "checkpoint",
+            "flux",
+            "wan",
+            "qwen image",
+            "hunyuan",
+            "ltx",
+            "hidream",
+            "ideogram",
+            "z-image",
+        )
+        if any(term in text for term in low_value_terms):
+            return True
+        return not any(term in text for term in high_value_terms)
+
+    if source.id == "huggingface-open-model-discovery":
+        model_id = str(raw.get("modelId") or raw.get("id") or "").lower()
+        author = model_id.split("/", 1)[0]
+        official_authors = vocab.OFFICIAL_MODEL_ORGS | vocab.TRUSTED_CONVERTERS
+        downloads = int(raw.get("downloads") or 0)
+        likes = int(raw.get("likes") or 0)
+        if downloads <= 0 and likes <= 0 and author not in official_authors and "comfyui" not in text:
+            return True
+    return False
+
+
+def has_visual_open_model_signal(text: str) -> bool:
+    visual_terms = (
+        "text-to-image",
+        "text to image",
+        "image-to-video",
+        "image to video",
+        "text-to-video",
+        "text to video",
+        "image generation",
+        "video generation",
+        "diffusion model",
+        "diffusers",
+        "stable diffusion",
+        "comfyui",
+        "controlnet",
+        "ip-adapter",
+        "checkpoint",
+        "lora",
+        "sdxl",
+        "flux",
+        "wan",
+        "hunyuan",
+        "ltx",
+        "qwen image",
+        "qwen-image",
+    )
+    low_value_terms = (
+        "uncensored",
+        "text-generation",
+        "text generation",
+        "large language model",
+        "language model",
+        "llm",
+        "mamba",
+        "falcon",
+    )
+    if any(term in text for term in low_value_terms) and not any(
+        term in text for term in ("image", "video", "diffusion", "comfyui", "flux", "wan", "lora")
+    ):
+        return False
+    return any(term in text for term in visual_terms)
 
 
 def guid_for(url: str, source_id: str) -> str:
@@ -1325,6 +1796,210 @@ def json_feed_headers(source: Source) -> dict[str, str]:
     return headers
 
 
+def bilibili_primary_cid(video: dict[str, Any], detail: dict[str, Any]) -> int | None:
+    for value in (video.get("cid"), detail.get("cid")):
+        cid = int_or_none(value)
+        if cid:
+            return cid
+    pages = detail.get("pages") if isinstance(detail, dict) else None
+    if isinstance(pages, list):
+        for page in pages:
+            if isinstance(page, dict):
+                cid = int_or_none(page.get("cid"))
+                if cid:
+                    return cid
+    return None
+
+
+def bilibili_subtitle_rows(player: dict[str, Any]) -> list[dict[str, Any]]:
+    subtitle = player.get("subtitle") if isinstance(player, dict) else None
+    subtitles = subtitle.get("subtitles") if isinstance(subtitle, dict) else None
+    if not isinstance(subtitles, list):
+        return []
+    return [row for row in subtitles if isinstance(row, dict)]
+
+
+def bilibili_engagement(video: dict[str, Any], detail: dict[str, Any] | None = None) -> dict[str, int]:
+    stat = detail.get("stat") if isinstance(detail, dict) else None
+    stat = stat if isinstance(stat, dict) else {}
+    views = first_int(stat.get("view"), video.get("play"))
+    likes = first_int(stat.get("like"), video.get("like"))
+    coins = first_int(stat.get("coin"), video.get("coins"))
+    favorites = first_int(stat.get("favorite"), video.get("favorites"))
+    shares = first_int(stat.get("share"), video.get("share"))
+    comments = first_int(stat.get("reply"), video.get("review"))
+    danmaku = first_int(stat.get("danmaku"), video.get("danmaku"))
+    weighted = views // 100 + likes * 2 + coins * 3 + favorites * 3 + shares * 4 + comments * 2 + danmaku // 20
+    return {
+        "views": views,
+        "likes": likes,
+        "coins": coins,
+        "favorites": favorites,
+        "shares": shares,
+        "comments": comments,
+        "danmaku": danmaku,
+        "weighted": weighted,
+    }
+
+
+def bilibili_content_understanding(
+    video: dict[str, Any],
+    detail: dict[str, Any] | None = None,
+    player: dict[str, Any] | None = None,
+    subtitle_text: str = "",
+) -> dict[str, Any]:
+    detail = detail if isinstance(detail, dict) else {}
+    player = player if isinstance(player, dict) else {}
+    description = clean_html(str(detail.get("desc") or video.get("description") or ""))
+    dynamic = clean_html(str(detail.get("dynamic") or ""))
+    pages = bilibili_page_titles(detail)
+    chapters = bilibili_chapter_titles(player)
+    subtitles = bilibili_subtitle_rows(player)
+    subtitle_labels = [
+        clean_html(str(row.get("lan_doc") or row.get("lan") or "subtitle"))
+        for row in subtitles
+        if row.get("lan_doc") or row.get("lan")
+    ]
+    term_context = " ".join(
+        part
+        for part in [
+            clean_html(str(video.get("title") or "")),
+            description,
+            dynamic,
+            " ".join(pages),
+            " ".join(chapters),
+            subtitle_text,
+        ]
+        if part
+    )
+    terms = bilibili_terms_from_text(term_context)
+    parts = []
+    if terms:
+        parts.append(f"Terms: {', '.join(terms)}.")
+    if description:
+        parts.append(f"Description: {description}")
+    if dynamic:
+        parts.append(f"Dynamic: {dynamic}")
+    if pages:
+        parts.append(f"Pages: {' / '.join(pages[:8])}")
+    if chapters:
+        parts.append(f"Chapters: {' / '.join(chapters[:12])}")
+    if subtitle_text:
+        parts.append(f"Subtitle: {subtitle_text}")
+    elif subtitle_labels:
+        parts.append(f"Subtitle available: {', '.join(subtitle_labels[:3])}")
+    summary = summarize(" ".join(parts) or description or clean_html(str(video.get("description") or "")), limit=1800)
+    return {
+        "summary": summary,
+        "description": description,
+        "dynamic": dynamic,
+        "pages": pages,
+        "chapters": chapters,
+        "subtitle_languages": subtitle_labels,
+        "subtitle_text": subtitle_text,
+        "subtitle_available": bool(subtitles),
+        "terms": terms,
+        "term_context": summarize(term_context, limit=2600),
+    }
+
+
+def bilibili_page_titles(detail: dict[str, Any]) -> list[str]:
+    pages = detail.get("pages") if isinstance(detail, dict) else None
+    if not isinstance(pages, list):
+        return []
+    titles: list[str] = []
+    for page in pages:
+        if not isinstance(page, dict):
+            continue
+        title = clean_html(str(page.get("part") or page.get("title") or ""))
+        if title:
+            titles.append(title)
+    return titles
+
+
+def bilibili_chapter_titles(player: dict[str, Any]) -> list[str]:
+    chapters = []
+    for key in ("view_points", "viewpoints", "chapters"):
+        rows = player.get(key) if isinstance(player, dict) else None
+        if isinstance(rows, list):
+            chapters.extend(rows)
+    titles: list[str] = []
+    for row in chapters:
+        if not isinstance(row, dict):
+            continue
+        title = clean_html(str(row.get("content") or row.get("title") or row.get("name") or ""))
+        if title:
+            titles.append(title)
+    return titles
+
+
+def bilibili_terms_from_text(text: str) -> list[str]:
+    value = normalize_text(text).lower()
+    terms = []
+    for term in BILIBILI_TERMINOLOGY:
+        if term.lower() in value:
+            terms.append(term)
+    return list(dict.fromkeys(terms))
+
+
+def bilibili_content_text(raw: dict[str, Any] | None) -> str:
+    if not isinstance(raw, dict):
+        return ""
+    understanding = raw.get("content_understanding")
+    if not isinstance(understanding, dict):
+        return ""
+    parts: list[str] = []
+    for key in ("summary", "description", "dynamic", "subtitle_text", "term_context"):
+        value = understanding.get(key)
+        if value:
+            parts.append(str(value))
+    for key in ("pages", "chapters", "terms"):
+        values = understanding.get(key)
+        if isinstance(values, list):
+            parts.extend(str(value) for value in values if value)
+    asr = understanding.get("asr")
+    if isinstance(asr, dict) and asr.get("text"):
+        parts.append(str(asr["text"]))
+    return normalize_text(" ".join(parts))
+
+
+def should_skip_bilibili_enrichment(url: str, pubdate: Any, known_urls: set[str]) -> bool:
+    """Skip re-enriching videos that are already stored with content understanding.
+
+    Videos newer than BILIBILI_REENRICH_HOURS are still refreshed because their
+    engagement numbers are still climbing.
+    """
+    if url not in known_urls:
+        return False
+    published = parse_unix_datetime(pubdate)
+    if published is None:
+        return True
+    age_hours = (utc_now() - published).total_seconds() / 3600
+    return age_hours >= settings.bilibili_reenrich_hours
+
+
+def bilibili_should_use_asr(text: str, engagement: dict[str, int]) -> bool:
+    weighted = int(engagement.get("weighted") or 0)
+    if weighted >= settings.bilibili_asr_min_weighted:
+        return True
+    return has_social_news_signal(text) or has_visual_open_model_signal(text)
+
+
+def first_int(*values: Any) -> int:
+    for value in values:
+        parsed = int_or_none(value)
+        if parsed is not None:
+            return parsed
+    return 0
+
+
+def int_or_none(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def interaction_count_from_raw(raw: dict[str, Any] | None) -> int | None:
     if not isinstance(raw, dict):
         return None
@@ -1336,6 +2011,31 @@ def interaction_count_from_raw(raw: dict[str, Any] | None) -> int | None:
         except (TypeError, ValueError):
             return None
     return None
+
+
+def author_followers_from_raw(raw: dict[str, Any] | None) -> int | None:
+    if not isinstance(raw, dict):
+        return None
+    engagement = raw.get("engagement")
+    if isinstance(engagement, dict):
+        value = engagement.get("author_followers")
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def x_author_followers(user: dict[str, Any] | None) -> int:
+    if not isinstance(user, dict):
+        return 0
+    metrics = user.get("public_metrics")
+    if not isinstance(metrics, dict):
+        return 0
+    try:
+        return max(0, int(metrics.get("followers_count") or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def json_feed_rows(payload: Any) -> list[dict[str, Any]]:
@@ -1552,10 +2252,7 @@ def cluster_key_for(title: str, summary: str, url: str) -> str:
         if match:
             return f"civitai:{match.group(1)}"
     normalized = f"{title} {summary}".lower()
-    model_match = re.search(
-        r"\b(flux(?:\s*\d(?:\.\d)?)?|wan(?:\s*2(?:\.\d)?)?|qwen(?:[-\s]?image)?|hunyuan(?:video)?|ltx(?:[-\s]?video)?|z[-\s]?image|hidream)\b",
-        normalized,
-    )
+    model_match = vocab.MODEL_FAMILY_RE.search(normalized)
     if model_match:
         return "model:" + normalize_text(model_match.group(1)).replace(" ", "-")
     text = f"{title} {summary}".lower()
@@ -1593,6 +2290,7 @@ def explain_item(
     github_stars: int | None = None,
     trusted_author: bool = False,
     interaction_count: int | None = None,
+    author_followers: int | None = None,
 ) -> str:
     text = f"{title} {summary}".lower()
     reasons: list[str] = []
@@ -1624,6 +2322,8 @@ def explain_item(
         reasons.append(f"{github_stars} GitHub stars")
     if trusted_author:
         reasons.append("trusted author")
+    if author_followers and author_followers >= 10000:
+        reasons.append("influential author")
     if interaction_count and interaction_count >= 100:
         reasons.append("high engagement")
     return ", ".join(reasons[:4]) or "matched ComfyUI keywords"
@@ -1683,6 +2383,22 @@ def parse_source_query(url: str) -> str:
     query_pairs = parse_qs(parsed.query)
     raw = (query_pairs.get("q") or query_pairs.get("keyword") or [""])[0]
     return html.unescape(raw).strip()
+
+
+def model_discovery_queries(value: str, *, default: str) -> list[str]:
+    raw = value.strip() or default
+    queries = [part.strip() for part in re.split(r"[|;]", raw) if part.strip()]
+    if not queries:
+        return [default]
+    seen: set[str] = set()
+    result: list[str] = []
+    for query in queries:
+        key = query.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(query)
+    return result
 
 
 async def scrape_x_browser_query(page: Any, query: str, scrolls: int, wait_ms: int) -> list[dict[str, Any]]:
@@ -1781,9 +2497,14 @@ def bilibili_signed_search_params(term: str, mixin_key: str | None) -> dict[str,
         "page": "1",
         "page_size": "20",
     }
+    return bilibili_signed_params(params, mixin_key)
+
+
+def bilibili_signed_params(params: dict[str, Any], mixin_key: str | None) -> dict[str, str]:
+    normalized = {key: str(value) for key, value in params.items() if value is not None}
     if not mixin_key:
-        return params
-    signed = {**params, "wts": str(int(time.time()))}
+        return normalized
+    signed = {**normalized, "wts": str(int(time.time()))}
     encoded = urlencode(sorted(signed.items()), quote_via=quote)
     signed["w_rid"] = hashlib.md5(f"{encoded}{mixin_key}".encode("utf-8")).hexdigest()
     return signed

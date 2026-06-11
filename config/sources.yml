@@ -1,3 +1,12 @@
+# Optional vocabulary overlay merged into app/vocab.py defaults.
+# Add a new model family here and tagging, featured rules, cluster keys and
+# Bilibili terminology all pick it up without code changes.
+# vocab:
+#   model_families:
+#     newmodel: ["newmodel", "new-model"]
+#   official_model_orgs: ["newlab-ai"]
+#   trusted_converters: ["someconverter"]
+
 keywords:
   include:
     - comfyui
@@ -33,6 +42,15 @@ keywords:
     - hugging face
     - civitai
     - model card
+    - text-to-image
+    - text to image
+    - image-to-video
+    - image to video
+    - text-to-video
+    - text to video
+    - video generation
+    - diffusion model
+    - diffusers
     - youtube
     - tutorial
     - discord
@@ -297,6 +315,14 @@ sources:
     tier: T2
     weight: 3
 
+  - id: huggingface-open-model-discovery
+    name: Hugging Face open model discovery
+    type: huggingface_models
+    url: local://huggingface-models?q=text-to-image|image-to-video|text-to-video|video generation|diffusers
+    category: models
+    tier: T2
+    weight: 2
+
   - id: civitai-comfyui-models
     name: Civitai ComfyUI model search
     type: civitai_models
@@ -304,6 +330,14 @@ sources:
     category: models
     tier: T2
     weight: 3
+
+  - id: civitai-open-model-discovery
+    name: Civitai open model discovery
+    type: civitai_models
+    url: local://civitai-models?q=checkpoint|video|sdxl
+    category: models
+    tier: T2
+    weight: 2
 
   - id: youtube-comfyui-models
     name: YouTube ComfyUI model/workflow search

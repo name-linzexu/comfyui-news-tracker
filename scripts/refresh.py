@@ -12,6 +12,7 @@ sys.path.insert(0, str(ROOT))
 
 from app.collector import collect_sync
 from app.digest import render_markdown_digest
+from app.llm_triage import triage_items
 from app.sources import load_sources
 from app.storage import Storage, utc_now
 
@@ -37,6 +38,10 @@ def main() -> None:
     parser.add_argument("--no-webhook", action="store_true", help="Do not send COMFYUI_NEWS_WEBHOOK_URL for this run.")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     parser.add_argument("--quiet", action="store_true", help="Only print the final summary line unless --json is used.")
+    parser.add_argument("--llm-triage", action="store_true", help="Review candidates with an LLM after refresh/rescore.")
+    parser.add_argument("--llm-triage-limit", type=int, default=40, help="Maximum rows to review when --llm-triage is set.")
+    parser.add_argument("--llm-triage-min-score", type=int, default=45, help="Minimum existing score for LLM triage candidates.")
+    parser.add_argument("--llm-triage-include-reviewed", action="store_true", help="Re-review rows that already have LLM triage.")
     parser.add_argument("--day", help="Digest date in YYYY-MM-DD format. Defaults to latest configured local digest day.")
     parser.add_argument("--out-dir", default=str(ROOT / "data" / "digests"), help="Digest output directory.")
     args = parser.parse_args()
@@ -70,6 +75,7 @@ def main() -> None:
     if args.mode == "rescore":
         sources, keywords = load_sources()
         changed = storage.rescore_items({source.id: source for source in sources}, keywords)
+        selection = storage.select_featured()
         result = {
             "started_at": utc_now().isoformat(),
             "finished_at": utc_now().isoformat(),
@@ -86,11 +92,29 @@ def main() -> None:
             "source_results": [],
             "operation": "rescore",
         }
+        result["featured_selection"] = selection
         storage.set_metadata("last_collect_result", result)
         storage.record_collect_run(result)
-        summary["rescore"] = {"updated": changed}
+        summary["rescore"] = {"updated": changed, "featured_selection": selection}
         if not args.quiet and not args.json:
-            print(f"Rescored existing items; updated {changed}.")
+            print(
+                f"Rescored existing items; updated {changed}; featured {selection['selected']} "
+                f"(deduped {selection['demoted_duplicates']}, quota-trimmed {selection['demoted_quota']})."
+            )
+
+    if args.llm_triage and args.mode in {"refresh", "rescore", "all"}:
+        triage = triage_items(
+            storage,
+            limit=args.llm_triage_limit,
+            min_score=args.llm_triage_min_score,
+            include_reviewed=args.llm_triage_include_reviewed,
+        )
+        summary["llm_triage"] = triage.as_dict()
+        if not args.quiet and not args.json:
+            print(
+                "LLM triage reviewed {reviewed}; kept {kept}; downgraded {downgraded}; "
+                "rejected {rejected}; failed {failed}; skipped {skipped}.".format(**summary["llm_triage"])
+            )
 
     if args.mode in {"export", "all"}:
         output = export_digest(storage, day=args.day, out_dir=Path(args.out_dir))
@@ -155,6 +179,15 @@ def compact_summary(summary: dict[str, Any]) -> str:
     rescore = summary.get("rescore")
     if rescore:
         parts.append(f"rescore=updated:{rescore['updated']}")
+    triage = summary.get("llm_triage")
+    if triage:
+        parts.append(
+            "llm_triage="
+            f"reviewed:{triage['reviewed']} "
+            f"downgraded:{triage['downgraded']} "
+            f"rejected:{triage['rejected']} "
+            f"failed:{triage.get('failed', 0)}"
+        )
     export = summary.get("export")
     if export:
         parts.append(f"export={export['path']}")
