@@ -10,6 +10,7 @@ from app import vocab
 from app.llm_triage import triage_priority
 from app.models import NewsItem
 from app.scoring import (
+    apply_llm_triage,
     engagement_velocity_points,
     follower_authority_points,
     score_breakdown,
@@ -411,6 +412,65 @@ class DeepDiveTests(unittest.TestCase):
         )
         self.assertEqual(result["decision"], "keep")
         self.assertEqual(result["content_type"], "model_deep_dive")
+
+
+class PromoHypeTests(unittest.TestCase):
+    def test_promo_hype_title_detection(self) -> None:
+        from app.scoring import is_promo_hype_title
+
+        self.assertTrue(is_promo_hype_title("Kill the Spaghetti! 🍝 TJ_NODE v2.0 (Update!!!): Wireless nodes"))
+        self.assertTrue(is_promo_hype_title("Stop using the default Mask Editor. TrixLoader brings SAM 3"))
+        self.assertTrue(is_promo_hype_title("🔥🚀 Best workflow pack ever"))
+        self.assertFalse(is_promo_hype_title("Wan 2.2 GGUF released with ComfyUI workflow update"))
+        self.assertFalse(is_promo_hype_title("feat: Add model support for SCAIL-2 (#14373)"))
+
+    def test_promo_hype_is_capped_below_featured_bar(self) -> None:
+        score = score_item(
+            title="Kill the Spaghetti! 🍝 TJ_NODE v2.0 (Update!!!): Wireless nodes",
+            summary="Wireless node connections for ComfyUI workflows.",
+            source_weight=3,
+            source_type="civitai_models",
+            source_tier="T2",
+            tags=["models", "model", "workflow"],
+            interaction_count=7,
+        )
+        self.assertLessEqual(score, 58)
+
+        community = score_item(
+            title="Stop using the default Mask Editor. TrixLoader brings advanced SAM 2.1/3",
+            summary="New mask editor replacement nodes for ComfyUI.",
+            source_weight=2,
+            source_type="rss",
+            source_tier="T2",
+            tags=["community", "custom-nodes", "model"],
+        )
+        self.assertLessEqual(community, 58)
+
+    def test_llm_keep_boost_is_limited_for_hype_titles(self) -> None:
+        title = "Kill the Spaghetti! 🍝 TJ_NODE v2.0 (Update!!!): Wireless nodes"
+        triage = {"decision": "keep", "importance": 88, "confidence": 90, "reason": "节点更新"}
+
+        score, featured, _, _, _ = apply_llm_triage(
+            score=58,
+            featured=False,
+            reason="",
+            cluster_key="",
+            cluster_title="",
+            triage=triage,
+            title=title,
+        )
+        self.assertEqual(score, 75)
+
+        plain_score, _, _, _, _ = apply_llm_triage(
+            score=58,
+            featured=False,
+            reason="",
+            cluster_key="",
+            cluster_title="",
+            triage=triage,
+            title="WanVideoWrapper adds LongCat Avatar support",
+        )
+        self.assertEqual(plain_score, 88)
 
 
 class DigestExportWindowTests(unittest.TestCase):

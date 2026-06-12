@@ -406,6 +406,37 @@ CIVITAI_PERSONAL_STYLE_TERMS = (
     "美女",
 )
 
+PROMO_HOOK_PHRASES = (
+    "stop using",
+    "say goodbye",
+    "game changer",
+    "game-changer",
+    "must have",
+    "must-have",
+    "you need this",
+    "all you need",
+    "insane",
+    "mind blowing",
+    "mind-blowing",
+    "never go back",
+    "blow your mind",
+)
+
+PROMO_BANG_RE = re.compile(r"!{2,}|！{2,}")
+
+
+def is_promo_hype_title(title: str) -> bool:
+    """Marketing-styled titles: emoji stacking, !!-chains, clickbait hooks."""
+    value = normalize_text(title)
+    lower = value.lower()
+    emoji_count = sum(1 for ch in value if 0x1F300 <= ord(ch) <= 0x1FAFF)
+    if emoji_count >= 2:
+        return True
+    if PROMO_BANG_RE.search(value) and emoji_count >= 1:
+        return True
+    return any(phrase in lower for phrase in PROMO_HOOK_PHRASES)
+
+
 COMMUNITY_QUESTION_RE = re.compile(
     r"^(?:how|what|which|where|why|is there|are there|can i|can you|does|do i|anyone|any one|need help|help|best|recommend|looking for)\b"
     r"|\?\s*$",
@@ -1156,6 +1187,17 @@ def score_breakdown(
         if total > personal_cap:
             penalty -= total - personal_cap
             total = personal_cap
+    if (
+        source_type in {"civitai_models", "huggingface_models"}
+        or (source_type == "rss" and source_tier == "T2")
+        or is_social_source_type(source_type)
+    ) and is_promo_hype_title(title):
+        # Marketing-styled titles stay listed but never reach the featured bar;
+        # LLM triage can still promote genuinely important ones.
+        hype_cap = 58
+        if total > hype_cap:
+            penalty -= total - hype_cap
+            total = hype_cap
     if source_type == "rss" and source_tier == "T2":
         if COMMUNITY_QUESTION_RE.search(title_lower) or is_low_value_social_text(text):
             community_cap = 56
@@ -1214,6 +1256,7 @@ def apply_llm_triage(
     cluster_key: str,
     cluster_title: str,
     triage: dict,
+    title: str | None = None,
 ) -> tuple[int, bool, str, str, str]:
     """Re-apply a stored LLM triage decision on top of rule-based scoring.
 
@@ -1230,7 +1273,12 @@ def apply_llm_triage(
         return min(score, 48), False, f"LLM triage downgraded: {note}"[:1000], cluster_key, cluster_title
     if decision == "keep":
         if importance >= 80:
-            score = max(score, importance)
+            # A keep verdict can rescue rule-capped items, but marketing-styled
+            # titles never ride the boost to the top of the feed.
+            boosted = importance
+            if title and is_promo_hype_title(title):
+                boosted = min(boosted, 75)
+            score = max(score, boosted)
         featured = featured or (score >= 72 and importance >= 78 and confidence >= 65)
         triage_reason = str(triage.get("reason") or "")
         if triage_reason and "LLM triage" not in reason:

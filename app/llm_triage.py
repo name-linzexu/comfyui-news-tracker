@@ -369,6 +369,7 @@ def apply_triage_result(storage: Storage, row: dict[str, Any], result: dict[str,
         cluster_key=str(row.get("cluster_key") or ""),
         cluster_title=str(row.get("cluster_title") or ""),
         triage=result,
+        title=str(row.get("title") or ""),
     )
 
     with storage.connection() as conn:

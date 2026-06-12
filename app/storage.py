@@ -1336,6 +1336,7 @@ class Storage:
             cluster_key=item.cluster_key,
             cluster_title=item.cluster_title,
             triage=triage,
+            title=item.title,
         )
         if (score, featured, reason, cluster_key, cluster_title) == (
             item.score,
