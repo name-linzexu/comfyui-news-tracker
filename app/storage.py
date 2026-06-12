@@ -129,6 +129,17 @@ def digest_day_bounds(day: str | None = None) -> tuple[str, str, str]:
     )
 
 
+def recent_digest_days(count: int = 3) -> list[str]:
+    """Local digest days ending today, oldest first.
+
+    Exports re-render this trailing window each run so a day's archive file
+    keeps filling up until the day is actually over, instead of being frozen
+    at whatever had been published by the morning run.
+    """
+    today = date.fromisoformat(digest_day_bounds()[0])
+    return [(today - timedelta(days=offset)).isoformat() for offset in range(max(1, count) - 1, -1, -1)]
+
+
 def normalize_fts_query(value: str | None) -> str | None:
     if not value:
         return None

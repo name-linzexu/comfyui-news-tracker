@@ -16,7 +16,13 @@ from app.scoring import (
     score_item,
 )
 from app.sources import author_followers_from_raw, x_author_followers
-from app.storage import Storage, featured_channel_for, featured_quotas
+from app.storage import (
+    Storage,
+    digest_day_bounds,
+    featured_channel_for,
+    featured_quotas,
+    recent_digest_days,
+)
 
 
 def make_item(
@@ -405,6 +411,16 @@ class DeepDiveTests(unittest.TestCase):
         )
         self.assertEqual(result["decision"], "keep")
         self.assertEqual(result["content_type"], "model_deep_dive")
+
+
+class DigestExportWindowTests(unittest.TestCase):
+    def test_recent_digest_days_end_today_oldest_first(self) -> None:
+        days = recent_digest_days(3)
+
+        self.assertEqual(len(days), 3)
+        self.assertEqual(days[-1], digest_day_bounds()[0])
+        self.assertEqual(days, sorted(days))
+        self.assertEqual(recent_digest_days(0), [digest_day_bounds()[0]])
 
 
 class TriagePriorityTests(unittest.TestCase):

@@ -40,7 +40,9 @@ if ($Schedule -eq "Hourly") {
     if ($EveryHours -lt 1) {
         throw "EveryHours must be at least 1."
     }
-    $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5) -RepetitionInterval (New-TimeSpan -Hours $EveryHours)
+    $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5) `
+        -RepetitionInterval (New-TimeSpan -Hours $EveryHours) `
+        -RepetitionDuration (New-TimeSpan -Days 3650)
     $scheduleText = "every $EveryHours hour(s), starting in 5 minutes"
 }
 else {

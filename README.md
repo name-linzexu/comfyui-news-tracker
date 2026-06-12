@@ -397,19 +397,20 @@ Content-Type: application/json
 
 ## 定时刷新
 
-安装 Windows 计划任务，默认每天本地时间 09:00 执行一次 `collect.ps1 -Mode all`，也就是刷新数据库并导出当天日报：
+推荐安装为每 2 小时一次的 Windows 计划任务（增量抓取下每轮仅约 20-90 秒）。一天只跑一次会有两个完整性问题：X/B 站这类快速滚动的信源会在两次抓取之间丢内容；而且当天日报在早晨导出后就不再更新。
 
 ```powershell
 cd comfyui-news-tracker
-.\scripts\install_scheduled_task.ps1
+.\scripts\install_scheduled_task.ps1 -Schedule Hourly -EveryHours 2 -LlmTriage
 ```
 
-自定义时间或改为每 2 小时刷新：
+也可以装成每天固定时间一次：
 
 ```powershell
-.\scripts\install_scheduled_task.ps1 -Schedule Daily -At 09:00 -Mode all
-.\scripts\install_scheduled_task.ps1 -Schedule Hourly -EveryHours 2 -Mode refresh
+.\scripts\install_scheduled_task.ps1 -Schedule Daily -At 09:00 -Mode all -LlmTriage
 ```
+
+每次运行的导出是**滚动窗口回补**：重新导出最近 `--export-days`（默认 3）天的日报文件，所以昨天/前天的归档会随着补抓的数据自动补全，不会冻结在某个时间点的状态。`-LlmTriage` 的审稿结果有持久化，频繁运行不会对同一条目重复扣费。
 
 日报按 `COMFYUI_NEWS_TIMEZONE` 分日，默认 `Asia/Shanghai`。外部推送仍需要先配置 `COMFYUI_NEWS_WEBHOOK_URL` 或 `.secrets\webhook_url.txt`。
 

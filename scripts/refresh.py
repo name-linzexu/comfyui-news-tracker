@@ -14,7 +14,7 @@ from app.collector import collect_sync
 from app.digest import render_markdown_digest
 from app.llm_triage import triage_items
 from app.sources import load_sources
-from app.storage import Storage, utc_now
+from app.storage import Storage, recent_digest_days, utc_now
 
 
 SLOW_SOURCE_TYPES = {"x_search", "github_search_repos"}
@@ -43,6 +43,12 @@ def main() -> None:
     parser.add_argument("--llm-triage-min-score", type=int, default=45, help="Minimum existing score for LLM triage candidates.")
     parser.add_argument("--llm-triage-include-reviewed", action="store_true", help="Re-review rows that already have LLM triage.")
     parser.add_argument("--day", help="Digest date in YYYY-MM-DD format. Defaults to latest configured local digest day.")
+    parser.add_argument(
+        "--export-days",
+        type=int,
+        default=3,
+        help="Re-export this many trailing digest days (today included) so earlier days keep back-filling. Ignored when --day is set.",
+    )
     parser.add_argument("--out-dir", default=str(ROOT / "data" / "digests"), help="Digest output directory.")
     args = parser.parse_args()
 
@@ -117,10 +123,15 @@ def main() -> None:
             )
 
     if args.mode in {"export", "all"}:
-        output = export_digest(storage, day=args.day, out_dir=Path(args.out_dir))
-        summary["export"] = {"path": str(output)}
+        if args.day:
+            days = [args.day]
+        else:
+            days = recent_digest_days(args.export_days)
+        outputs = [export_digest(storage, day=target, out_dir=Path(args.out_dir)) for target in days]
+        summary["export"] = {"paths": [str(output) for output in outputs]}
         if not args.quiet and not args.json:
-            print(f"Exported digest: {output}")
+            for output in outputs:
+                print(f"Exported digest: {output}")
 
     if args.json:
         print(json.dumps(summary, ensure_ascii=False, indent=2))
@@ -190,7 +201,9 @@ def compact_summary(summary: dict[str, Any]) -> str:
         )
     export = summary.get("export")
     if export:
-        parts.append(f"export={export['path']}")
+        paths = export.get("paths") or ([export["path"]] if export.get("path") else [])
+        if paths:
+            parts.append(f"export={paths[-1]} (+{len(paths) - 1} backfilled)" if len(paths) > 1 else f"export={paths[0]}")
     return " | ".join(parts)
 
 
